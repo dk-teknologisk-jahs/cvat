@@ -1,5 +1,5 @@
 // Copyright (C) 2020-2022 Intel Corporation
-// Copyright (C) 2022-2024 CVAT.ai Corporation
+// Copyright (C) CVAT.ai Corporation
 //
 // SPDX-License-Identifier: MIT
 
@@ -65,7 +65,6 @@ import { Organization, getCore } from 'cvat-core-wrapper';
 import {
     ErrorState, NotificationState, NotificationsState, PluginsState,
 } from 'reducers';
-import { customWaViewHit } from 'utils/environment';
 import showPlatformNotification, {
     platformInfo,
     stopNotifications,
@@ -82,6 +81,7 @@ import IncorrectEmailConfirmationPage from './email-confirmation-pages/incorrect
 import CreateJobPage from './create-job-page/create-job-page';
 import AnalyticsPage from './analytics-page/analytics-page';
 import QualityControlPage from './quality-control/quality-control-page';
+import ConsensusManagementPage from './consensus-management-page/consensus-management-page';
 import InvitationWatcher from './invitation-watcher/invitation-watcher';
 
 interface CVATAppProps {
@@ -142,7 +142,7 @@ class CVATApplication extends React.PureComponent<CVATAppProps & RouteComponentP
 
     public componentDidMount(): void {
         const core = getCore();
-        const { history, location, onChangeLocation } = this.props;
+        const { history, onChangeLocation } = this.props;
         const {
             HEALTH_CHECK_RETRIES, HEALTH_CHECK_PERIOD, HEALTH_CHECK_REQUEST_TIMEOUT,
             SERVER_UNAVAILABLE_COMPONENT, RESET_NOTIFICATIONS_PATHS,
@@ -170,9 +170,7 @@ class CVATApplication extends React.PureComponent<CVATAppProps & RouteComponentP
             }
         };
 
-        customWaViewHit(location.pathname, location.search, location.hash);
         history.listen((newLocation) => {
-            customWaViewHit(newLocation.pathname, newLocation.search, newLocation.hash);
             const { location: prevLocation } = this.props;
 
             onChangeLocation(prevLocation.pathname, newLocation.pathname);
@@ -328,6 +326,11 @@ class CVATApplication extends React.PureComponent<CVATAppProps & RouteComponentP
             loadServerAPISchema();
         }
 
+        if (!aboutInitialized && !aboutFetching) {
+            loadAbout();
+            return;
+        }
+
         if (user == null || !user.isVerified || !user.id) {
             return;
         }
@@ -338,10 +341,6 @@ class CVATApplication extends React.PureComponent<CVATAppProps & RouteComponentP
 
         if (!formatsInitialized && !formatsFetching) {
             loadFormats();
-        }
-
-        if (!aboutInitialized && !aboutFetching) {
-            loadAbout();
         }
 
         if (organizationInitialized && !requestsInitialized && !requestsFetching) {
@@ -398,18 +397,21 @@ class CVATApplication extends React.PureComponent<CVATAppProps & RouteComponentP
         function showError(title: string, _error: Error, shouldLog?: boolean, className?: string): void {
             const error = _error?.message || _error.toString();
             const dynamicProps = typeof className === 'undefined' ? {} : { className };
+
             let errorLength = error.length;
             // Do not count the length of the link in the Markdown error message
             if (/]\(.+\)/.test(error)) {
                 errorLength = error.replace(/]\(.+\)/, ']').length;
             }
+
             notification.error({
                 ...dynamicProps,
                 message: (
                     <CVATMarkdown history={history}>{title}</CVATMarkdown>
                 ),
                 duration: null,
-                description: errorLength > 300 ? 'Open the Browser Console to get details' : <CVATMarkdown history={history}>{error}</CVATMarkdown>,
+                description: errorLength > appConfig.MAXIMUM_NOTIFICATION_MESSAGE_LENGTH ?
+                    'Open the Browser Console to get details' : <CVATMarkdown history={history}>{error}</CVATMarkdown>,
             });
 
             if (shouldLog) {
@@ -509,6 +511,7 @@ class CVATApplication extends React.PureComponent<CVATAppProps & RouteComponentP
                                         <Route exact path='/tasks/:id' component={TaskPageComponent} />
                                         <Route exact path='/tasks/:tid/analytics' component={AnalyticsPage} />
                                         <Route exact path='/tasks/:tid/quality-control' component={QualityControlPage} />
+                                        <Route exact path='/tasks/:tid/consensus' component={ConsensusManagementPage} />
                                         <Route exact path='/tasks/:id/jobs/create' component={CreateJobPage} />
                                         <Route exact path='/tasks/:id/guide' component={AnnotationGuidePage} />
                                         <Route exact path='/tasks/:tid/jobs/:jid' component={AnnotationPageContainer} />

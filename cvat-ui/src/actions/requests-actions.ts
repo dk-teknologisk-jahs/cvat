@@ -1,14 +1,21 @@
-// Copyright (C) 2024 CVAT.ai Corporation
+// Copyright (C) CVAT.ai Corporation
 //
 // SPDX-License-Identifier: MIT
 
 import { ActionUnion, createAction } from 'utils/redux';
-import { RequestsQuery, RequestsState } from 'reducers';
-import {
-    Request, ProjectOrTaskOrJob, getCore, RQStatus,
-} from 'cvat-core-wrapper';
+import { CombinedState, RequestsQuery } from 'reducers';
+import { Request, getCore } from 'cvat-core-wrapper';
+import { Store } from 'redux';
+import { getCVATStore } from 'cvat-store';
 
 const core = getCore();
+let store: null | Store<CombinedState> = null;
+function getStore(): Store<CombinedState> {
+    if (store === null) {
+        store = getCVATStore();
+    }
+    return store;
+}
 
 export enum RequestsActionsTypes {
     GET_REQUESTS = 'GET_REQUESTS',
@@ -57,45 +64,21 @@ export interface RequestInstanceType {
     type: 'project' | 'task' | 'job';
 }
 
-export function getInstanceType(instance: ProjectOrTaskOrJob | RequestInstanceType): 'project' | 'task' | 'job' {
-    if (instance instanceof core.classes.Project) {
-        return 'project';
-    }
-
-    if (instance instanceof core.classes.Task) {
-        return 'task';
-    }
-
-    if (instance instanceof core.classes.Job) {
-        return 'job';
-    }
-
-    return instance.type;
-}
-
 export function updateRequestProgress(request: Request, dispatch: (action: RequestsActions) => void): void {
     dispatch(
         requestsActions.getRequestStatusSuccess(request),
     );
 }
 
-export function shouldListenForProgress(rqID: string | undefined, state: RequestsState): boolean {
-    return (
-        typeof rqID === 'string' &&
-        (!state.requests[rqID] || [RQStatus.FINISHED, RQStatus.FAILED].includes(state.requests[rqID]?.status))
-    );
-}
-
 export function listen(
     requestID: string,
     dispatch: (action: RequestsActions) => void,
-    initialRequest?: Request,
 ) : Promise<Request> {
-    return core.requests
-        .listen(requestID, {
-            callback: (updatedRequest) => {
-                updateRequestProgress(updatedRequest, dispatch);
-            },
-            initialRequest,
-        });
+    const { requests } = getStore().getState().requests;
+    return core.requests.listen(requestID, {
+        callback: (updatedRequest) => {
+            updateRequestProgress(updatedRequest, dispatch);
+        },
+        initialRequest: requests[requestID],
+    });
 }

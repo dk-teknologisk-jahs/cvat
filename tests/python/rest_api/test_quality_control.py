@@ -1,13 +1,14 @@
-# Copyright (C) 2023-2024 CVAT.ai Corporation
+# Copyright (C) CVAT.ai Corporation
 #
 # SPDX-License-Identifier: MIT
 
 import json
+from collections.abc import Iterable
 from copy import deepcopy
 from functools import partial
 from http import HTTPStatus
 from itertools import groupby
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Optional
 
 import pytest
 from cvat_sdk.api_client import exceptions, models
@@ -84,7 +85,7 @@ class _PermissionTestBase:
     def find_sandbox_task(self, tasks, jobs, users, is_task_staff):
         def _find(
             is_staff: bool, *, has_gt_jobs: Optional[bool] = None
-        ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        ) -> tuple[dict[str, Any], dict[str, Any]]:
             task = next(
                 t
                 for t in tasks
@@ -116,7 +117,7 @@ class _PermissionTestBase:
     def find_org_task(self, tasks, jobs, users, is_org_member, is_task_staff):
         def _find(
             is_staff: bool, user_org_role: str, *, has_gt_jobs: Optional[bool] = None
-        ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        ) -> tuple[dict[str, Any], dict[str, Any]]:
             for user in users:
                 if user["is_superuser"]:
                     continue
@@ -249,7 +250,7 @@ class TestListQualityReports(_PermissionTestBase):
 @pytest.mark.usefixtures("restore_db_per_class")
 class TestGetQualityReports(_PermissionTestBase):
     def _test_get_report_200(
-        self, user: str, obj_id: int, *, expected_data: Optional[Dict[str, Any]] = None, **kwargs
+        self, user: str, obj_id: int, *, expected_data: Optional[dict[str, Any]] = None, **kwargs
     ):
         with make_api_client(user) as api_client:
             (_, response) = api_client.quality_api.retrieve_report(obj_id, **kwargs)
@@ -308,7 +309,7 @@ class TestGetQualityReports(_PermissionTestBase):
 @pytest.mark.usefixtures("restore_db_per_class")
 class TestGetQualityReportData(_PermissionTestBase):
     def _test_get_report_data_200(
-        self, user: str, obj_id: int, *, expected_data: Optional[Dict[str, Any]] = None, **kwargs
+        self, user: str, obj_id: int, *, expected_data: Optional[dict[str, Any]] = None, **kwargs
     ):
         with make_api_client(user) as api_client:
             (_, response) = api_client.quality_api.retrieve_report_data(obj_id, **kwargs)
@@ -603,7 +604,7 @@ class TestPostQualityReports(_PermissionTestBase):
 
     def test_non_rq_job_owner_cannot_check_status_of_report_creation_in_sandbox(
         self,
-        find_sandbox_task_without_gt: Callable[[bool], Tuple[Dict[str, Any], Dict[str, Any]]],
+        find_sandbox_task_without_gt: Callable[[bool], tuple[dict[str, Any], dict[str, Any]]],
         admin_user: str,
         users: Iterable,
     ):
@@ -630,8 +631,8 @@ class TestPostQualityReports(_PermissionTestBase):
         self,
         role: str,
         admin_user: str,
-        find_org_task_without_gt: Callable[[bool, str], Tuple[Dict[str, Any], Dict[str, Any]]],
-        find_users: Callable[..., List[Dict[str, Any]]],
+        find_org_task_without_gt: Callable[[bool, str], tuple[dict[str, Any], dict[str, Any]]],
+        find_users: Callable[..., list[dict[str, Any]]],
     ):
         task, task_staff = find_org_task_without_gt(is_staff=True, user_org_role="supervisor")
 
@@ -657,8 +658,8 @@ class TestPostQualityReports(_PermissionTestBase):
         is_sandbox: bool,
         users: Iterable,
         admin_user: str,
-        find_org_task_without_gt: Callable[[bool, str], Tuple[Dict[str, Any], Dict[str, Any]]],
-        find_sandbox_task_without_gt: Callable[[bool], Tuple[Dict[str, Any], Dict[str, Any]]],
+        find_org_task_without_gt: Callable[[bool, str], tuple[dict[str, Any], dict[str, Any]]],
+        find_sandbox_task_without_gt: Callable[[bool], tuple[dict[str, Any], dict[str, Any]]],
     ):
         if is_sandbox:
             task, task_staff = find_sandbox_task_without_gt(is_staff=True)
@@ -696,7 +697,7 @@ class TestSimpleQualityReportsFilters(CollectionSimpleFilterTestBase):
     def _get_endpoint(self, api_client: ApiClient) -> Endpoint:
         return api_client.quality_api.list_reports_endpoint
 
-    def _get_field_samples(self, field: str) -> Tuple[Any, List[Dict[str, Any]]]:
+    def _get_field_samples(self, field: str) -> tuple[Any, list[dict[str, Any]]]:
         if field == "task_id":
             # This filter includes both the task and nested job reports
             task_id, task_reports = super()._get_field_samples(field)
@@ -819,7 +820,7 @@ class TestSimpleQualityConflictsFilters(CollectionSimpleFilterTestBase):
     def _get_endpoint(self, api_client: ApiClient) -> Endpoint:
         return api_client.quality_api.list_conflicts_endpoint
 
-    def _get_field_samples(self, field: str) -> Tuple[Any, List[Dict[str, Any]]]:
+    def _get_field_samples(self, field: str) -> tuple[Any, list[dict[str, Any]]]:
         if field == "job_id":
             # This field is not included in the response
             job_id = self._find_valid_field_value(self.report_samples, field_path=["job_id"])
@@ -889,7 +890,7 @@ class TestSimpleQualitySettingsFilters(CollectionSimpleFilterTestBase):
 @pytest.mark.usefixtures("restore_db_per_class")
 class TestListSettings(_PermissionTestBase):
     def _test_list_settings_200(
-        self, user: str, task_id: int, *, expected_data: Optional[Dict[str, Any]] = None, **kwargs
+        self, user: str, task_id: int, *, expected_data: Optional[dict[str, Any]] = None, **kwargs
     ):
         with make_api_client(user) as api_client:
             actual = get_paginated_collection(
@@ -951,7 +952,7 @@ class TestListSettings(_PermissionTestBase):
 @pytest.mark.usefixtures("restore_db_per_class")
 class TestGetSettings(_PermissionTestBase):
     def _test_get_settings_200(
-        self, user: str, obj_id: int, *, expected_data: Optional[Dict[str, Any]] = None, **kwargs
+        self, user: str, obj_id: int, *, expected_data: Optional[dict[str, Any]] = None, **kwargs
     ):
         with make_api_client(user) as api_client:
             (_, response) = api_client.quality_api.retrieve_settings(obj_id, **kwargs)
@@ -1016,9 +1017,9 @@ class TestPatchSettings(_PermissionTestBase):
         self,
         user: str,
         obj_id: int,
-        data: Dict[str, Any],
+        data: dict[str, Any],
         *,
-        expected_data: Optional[Dict[str, Any]] = None,
+        expected_data: Optional[dict[str, Any]] = None,
         **kwargs,
     ):
         with make_api_client(user) as api_client:
@@ -1032,7 +1033,7 @@ class TestPatchSettings(_PermissionTestBase):
 
         return response
 
-    def _test_patch_settings_403(self, user: str, obj_id: int, data: Dict[str, Any], **kwargs):
+    def _test_patch_settings_403(self, user: str, obj_id: int, data: dict[str, Any], **kwargs):
         with make_api_client(user) as api_client:
             (_, response) = api_client.quality_api.partial_update_settings(
                 obj_id,
@@ -1045,7 +1046,7 @@ class TestPatchSettings(_PermissionTestBase):
 
         return response
 
-    def _get_request_data(self, data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    def _get_request_data(self, data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         patched_data = deepcopy(data)
 
         for field, value in data.items():
@@ -1211,6 +1212,8 @@ class TestQualityReportMetrics(_PermissionTestBase):
             "oks_sigma",
             "compare_line_orientation",
             "panoptic_comparison",
+            "point_size_base",
+            "empty_is_annotated",
         ],
     )
     def test_settings_affect_metrics(
@@ -1228,6 +1231,12 @@ class TestQualityReportMetrics(_PermissionTestBase):
             settings[parameter] = 1 - settings[parameter]
             if parameter == "group_match_threshold":
                 settings[parameter] = 0.9
+        elif parameter == "point_size_base":
+            settings[parameter] = next(
+                v
+                for v in models.PointSizeBaseEnum.allowed_values[("value",)].values()
+                if v != settings[parameter]
+            )
         else:
             assert False
 
@@ -1237,7 +1246,15 @@ class TestQualityReportMetrics(_PermissionTestBase):
             )
 
         new_report = self.create_quality_report(admin_user, task_id)
-        assert new_report["summary"]["conflict_count"] != old_report["summary"]["conflict_count"]
+        if parameter == "empty_is_annotated":
+            assert new_report["summary"]["valid_count"] != old_report["summary"]["valid_count"]
+            assert new_report["summary"]["total_count"] != old_report["summary"]["total_count"]
+            assert new_report["summary"]["ds_count"] != old_report["summary"]["ds_count"]
+            assert new_report["summary"]["gt_count"] != old_report["summary"]["gt_count"]
+        else:
+            assert (
+                new_report["summary"]["conflict_count"] != old_report["summary"]["conflict_count"]
+            )
 
     def test_old_report_can_be_loaded(self, admin_user, quality_reports):
         report = min((r for r in quality_reports if r["task_id"]), key=lambda r: r["id"])
@@ -1412,3 +1429,112 @@ class TestQualityReportMetrics(_PermissionTestBase):
             assert [f for f in gt_frames if f != excluded_gt_frame] == json.loads(response.data)[
                 "comparison_summary"
             ]["frames"]
+
+    def test_quality_metrics_in_task_with_gt_and_tracks(
+        self,
+        admin_user,
+        tasks,
+        labels,
+    ):
+        task_id = next(
+            t["id"]
+            for t in tasks
+            if not t["validation_mode"] and t["size"] >= 5 and not t["project_id"]
+        )
+        label_id = next(l["id"] for l in labels if l.get("task_id") == task_id)
+
+        with make_api_client(admin_user) as api_client:
+            gt_frames = [1, 3]
+            gt_job = api_client.jobs_api.create(
+                job_write_request=models.JobWriteRequest(
+                    type="ground_truth",
+                    task_id=task_id,
+                    frame_selection_method="manual",
+                    frames=gt_frames,
+                )
+            )[0]
+
+            gt_annotations = {
+                "shapes": [
+                    {
+                        "frame": 1,
+                        "label_id": label_id,
+                        "points": [0.5, 1.5, 2.5, 3.5],
+                        "rotation": 0,
+                        "type": "rectangle",
+                        "occluded": False,
+                        "outside": False,
+                        "attributes": [],
+                    },
+                    {
+                        "frame": 3,
+                        "label_id": label_id,
+                        "points": [3.0, 4.0, 5.0, 6.0],
+                        "rotation": 0,
+                        "type": "rectangle",
+                        "occluded": False,
+                        "outside": False,
+                        "attributes": [],
+                    },
+                ]
+            }
+
+            normal_annotations = {
+                "tracks": [
+                    {
+                        "type": "rectangle",
+                        "frame": 0,
+                        "label_id": label_id,
+                        "shapes": [
+                            {
+                                "frame": 0,
+                                "points": [1.0, 2.0, 3.0, 4.0],
+                                "rotation": 0,
+                                "type": "rectangle",
+                                "occluded": False,
+                                "outside": False,
+                                "attributes": [],
+                            },
+                            {
+                                "frame": 2,  # not included, but must affect interpolation
+                                "points": [0.0, 1.0, 2.0, 3.0],
+                                "rotation": 0,
+                                "type": "rectangle",
+                                "occluded": False,
+                                "outside": False,
+                                "attributes": [],
+                            },
+                            {
+                                "frame": 4,
+                                "points": [6.0, 7.0, 8.0, 9.0],
+                                "rotation": 0,
+                                "type": "rectangle",
+                                "occluded": False,
+                                "outside": False,
+                                "attributes": [],
+                            },
+                        ],
+                    }
+                ]
+            }
+
+            api_client.jobs_api.update_annotations(
+                gt_job.id, job_annotations_update_request=gt_annotations
+            )
+
+            api_client.tasks_api.update_annotations(
+                task_id, task_annotations_update_request=normal_annotations
+            )
+
+            api_client.jobs_api.partial_update(
+                gt_job.id,
+                patched_job_write_request=models.PatchedJobWriteRequest(
+                    stage="acceptance", state="completed"
+                ),
+            )
+
+            report = self.create_quality_report(admin_user, task_id)
+
+            assert report["summary"]["conflict_count"] == 0
+            assert report["summary"]["valid_count"] == 2
+            assert report["summary"]["total_count"] == 2

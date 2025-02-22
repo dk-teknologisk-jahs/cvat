@@ -1,5 +1,5 @@
 // Copyright (C) 2019-2022 Intel Corporation
-// Copyright (C) 2022-2024 CVAT.ai Corporation
+// Copyright (C) CVAT.ai Corporation
 //
 // SPDX-License-Identifier: MIT
 
@@ -29,6 +29,7 @@ import logger from './logger';
 import Issue from './issue';
 import ObjectState from './object-state';
 import { JobValidationLayout, TaskValidationLayout } from './validation-layout';
+import { UpdateStatusData } from './core-types';
 
 function buildDuplicatedAPI(prototype) {
     Object.defineProperties(prototype, {
@@ -168,6 +169,17 @@ function buildDuplicatedAPI(prototype) {
 
                 async export() {
                     const result = await PluginRegistry.apiWrapper.call(this, prototype.annotations.export);
+                    return result;
+                },
+
+                async commit(added, removed, frame) {
+                    const result = await PluginRegistry.apiWrapper.call(
+                        this,
+                        prototype.annotations.commit,
+                        added,
+                        removed,
+                        frame,
+                    );
                     return result;
                 },
 
@@ -331,7 +343,7 @@ export class Session {
             delTrackKeyframesOnly?: boolean;
         }) => Promise<void>;
         save: (
-            onUpdate ?: (message: string) => void,
+            onUpdate?: (message: string) => void,
         ) => Promise<void>;
         search: (
             frameFrom: number,
@@ -360,6 +372,11 @@ export class Session {
         }>;
         import: (data: Omit<SerializedCollection, 'version'>) => Promise<void>;
         export: () => Promise<Omit<SerializedCollection, 'version'>>;
+        commit: (
+            added: Omit<SerializedCollection, 'version'>,
+            removed: Omit<SerializedCollection, 'version'>,
+            frame: number,
+        ) => Promise<void>;
         statistics: () => Promise<Statistics>;
         hasUnsavedChanges: () => boolean;
         exportDataset: (
@@ -372,8 +389,8 @@ export class Session {
     };
 
     public actions: {
-        undo: (count: number) => Promise<number[]>;
-        redo: (count: number) => Promise<number[]>;
+        undo: (count?: number) => Promise<number[]>;
+        redo: (count?: number) => Promise<number[]>;
         freeze: (frozen: boolean) => Promise<void>;
         clear: () => Promise<void>;
         get: () => Promise<{ undo: [HistoryActions, number][], redo: [HistoryActions, number][] }>;
@@ -402,8 +419,8 @@ export class Session {
     public logger: {
         log: (
             scope: Parameters<typeof logger.log>[0],
-            payload: Parameters<typeof logger.log>[1],
-            wait: Parameters<typeof logger.log>[2],
+            payload?: Parameters<typeof logger.log>[1],
+            wait?: Parameters<typeof logger.log>[2],
         ) => ReturnType<typeof logger.log>;
     };
 
@@ -430,6 +447,7 @@ export class Session {
             select: Object.getPrototypeOf(this).annotations.select.bind(this),
             import: Object.getPrototypeOf(this).annotations.import.bind(this),
             export: Object.getPrototypeOf(this).annotations.export.bind(this),
+            commit: Object.getPrototypeOf(this).annotations.commit.bind(this),
             statistics: Object.getPrototypeOf(this).annotations.statistics.bind(this),
             hasUnsavedChanges: Object.getPrototypeOf(this).annotations.hasUnsavedChanges.bind(this),
             exportDataset: Object.getPrototypeOf(this).annotations.exportDataset.bind(this),
@@ -462,7 +480,7 @@ export class Session {
     }
 }
 
-type InitializerType = Readonly<Omit<SerializedJob, 'labels'> & { labels?: SerializedLabel[] }>;
+type InitializerType = Readonly<Partial<Omit<SerializedJob, 'labels'> & { labels?: SerializedLabel[] }>>;
 
 export class Job extends Session {
     #data: {
@@ -476,7 +494,7 @@ export class Job extends Session {
         frame_count?: number;
         project_id: number | null;
         guide_id: number | null;
-        task_id: number | null;
+        task_id: number;
         labels: Label[];
         dimension?: DimensionType;
         data_compressed_chunk_type?: ChunkType;
@@ -487,6 +505,8 @@ export class Job extends Session {
         updated_date?: string,
         source_storage: Storage,
         target_storage: Storage,
+        parent_job_id: number | null;
+        consensus_replicas: number;
     };
 
     constructor(initialData: InitializerType) {
@@ -514,6 +534,8 @@ export class Job extends Session {
             updated_date: undefined,
             source_storage: undefined,
             target_storage: undefined,
+            parent_job_id: null,
+            consensus_replicas: undefined,
         };
 
         this.#data.id = initialData.id ?? this.#data.id;
@@ -528,6 +550,8 @@ export class Job extends Session {
         this.#data.data_chunk_size = initialData.data_chunk_size ?? this.#data.data_chunk_size;
         this.#data.mode = initialData.mode ?? this.#data.mode;
         this.#data.created_date = initialData.created_date ?? this.#data.created_date;
+        this.#data.parent_job_id = initialData.parent_job_id ?? this.#data.parent_job_id;
+        this.#data.consensus_replicas = initialData.consensus_replicas ?? this.#data.consensus_replicas;
 
         if (Array.isArray(initialData.labels)) {
             this.#data.labels = initialData.labels.map((labelData) => {
@@ -623,12 +647,20 @@ export class Job extends Session {
         return this.#data.guide_id;
     }
 
-    public get taskId(): number | null {
+    public get taskId(): number {
         return this.#data.task_id;
     }
 
     public get dimension(): DimensionType {
         return this.#data.dimension;
+    }
+
+    public get parentJobId(): number | null {
+        return this.#data.parent_job_id;
+    }
+
+    public get consensusReplicas(): number {
+        return this.#data.consensus_replicas;
     }
 
     public get dataChunkType(): ChunkType {
@@ -705,6 +737,11 @@ export class Job extends Session {
         const result = await PluginRegistry.apiWrapper.call(this, Job.prototype.delete);
         return result;
     }
+
+    async mergeConsensusJobs(): Promise<void> {
+        const result = await PluginRegistry.apiWrapper.call(this, Job.prototype.mergeConsensusJobs);
+        return result;
+    }
 }
 
 export class Task extends Session {
@@ -733,6 +770,7 @@ export class Task extends Session {
     public readonly organization: number | null;
     public readonly progress: { count: number; completed: number };
     public readonly jobs: Job[];
+    public readonly consensusEnabled: boolean;
 
     public readonly startFrame: number;
     public readonly stopFrame: number;
@@ -792,6 +830,7 @@ export class Task extends Session {
             cloud_storage_id: undefined,
             sorting_method: undefined,
             files: undefined,
+            consensus_enabled: undefined,
 
             validation_mode: null,
         };
@@ -869,6 +908,8 @@ export class Task extends Session {
                     data_chunk_size: data.data_chunk_size,
                     target_storage: initialData.target_storage,
                     source_storage: initialData.source_storage,
+                    parent_job_id: job.parent_job_id,
+                    consensus_replicas: job.consensus_replicas,
                 });
                 data.jobs.push(jobInstance);
             }
@@ -975,6 +1016,9 @@ export class Task extends Session {
                 },
                 copyData: {
                     get: () => data.copy_data,
+                },
+                consensusEnabled: {
+                    get: () => data.consensus_enabled,
                 },
                 labels: {
                     get: () => [...data.labels],
@@ -1141,7 +1185,7 @@ export class Task extends Session {
 
     async save(
         fields: Record<string, any> = {},
-        options?: { requestStatusCallback?: (request: Request) => void },
+        options?: { updateStatusCallback?: (updateData: Request | UpdateStatusData) => void },
     ): Promise<Task> {
         const result = await PluginRegistry.apiWrapper.call(this, Task.prototype.save, fields, options);
         return result;
@@ -1157,6 +1201,11 @@ export class Task extends Session {
 
     async delete(): Promise<void> {
         const result = await PluginRegistry.apiWrapper.call(this, Task.prototype.delete);
+        return result;
+    }
+
+    async mergeConsensusJobs(): Promise<void> {
+        const result = await PluginRegistry.apiWrapper.call(this, Task.prototype.mergeConsensusJobs);
         return result;
     }
 

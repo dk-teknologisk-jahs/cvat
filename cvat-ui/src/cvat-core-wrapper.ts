@@ -1,5 +1,5 @@
 // Copyright (C) 2020-2022 Intel Corporation
-// Copyright (C) 2023-2024 CVAT.ai Corporation
+// Copyright (C) CVAT.ai Corporation
 //
 // SPDX-License-Identifier: MIT
 
@@ -10,24 +10,25 @@ import ObjectState from 'cvat-core/src/object-state';
 import Webhook from 'cvat-core/src/webhook';
 import MLModel from 'cvat-core/src/ml-model';
 import CloudStorage from 'cvat-core/src/cloud-storage';
-import { ModelProvider } from 'cvat-core/src/lambda-manager';
 import {
     Label, Attribute,
 } from 'cvat-core/src/labels';
 import {
     SerializedAttribute, SerializedLabel, SerializedAPISchema,
 } from 'cvat-core/src/server-response-types';
+import { UpdateStatusData } from 'cvat-core/src/core-types';
 import { Job, Task } from 'cvat-core/src/session';
 import Project from 'cvat-core/src/project';
 import QualityReport, { QualitySummary } from 'cvat-core/src/quality-report';
 import QualityConflict, { AnnotationConflict, ConflictSeverity } from 'cvat-core/src/quality-conflict';
 import QualitySettings, { TargetMetric } from 'cvat-core/src/quality-settings';
+import ConsensusSettings from 'cvat-core/src/consensus-settings';
 import { FramesMetaData, FrameData } from 'cvat-core/src/frames';
 import { ServerError, RequestError } from 'cvat-core/src/exceptions';
 import {
-    ShapeType, LabelType, ModelKind, ModelProviders,
-    ModelReturnType, DimensionType, JobType,
-    JobStage, JobState, RQStatus,
+    ShapeType, ObjectType, LabelType, ModelKind, ModelProviders,
+    DimensionType, JobType, Source,
+    JobStage, JobState, RQStatus, StorageLocation,
 } from 'cvat-core/src/enums';
 import { Storage, StorageData } from 'cvat-core/src/storage';
 import Issue from 'cvat-core/src/issue';
@@ -40,8 +41,11 @@ import AnalyticsReport, { AnalyticsEntryViewType, AnalyticsEntry } from 'cvat-co
 import { Dumper } from 'cvat-core/src/annotation-formats';
 import { Event } from 'cvat-core/src/event';
 import { APIWrapperEnterOptions } from 'cvat-core/src/plugins';
-import BaseSingleFrameAction, { ActionParameterType, FrameSelectionType } from 'cvat-core/src/annotations-actions';
-import { Request } from 'cvat-core/src/request';
+import { BaseShapesAction } from 'cvat-core/src/annotations-actions/base-shapes-action';
+import { BaseCollectionAction } from 'cvat-core/src/annotations-actions/base-collection-action';
+import { ActionParameterType, BaseAction } from 'cvat-core/src/annotations-actions/base-action';
+import { Request, RequestOperation } from 'cvat-core/src/request';
+import AboutData from 'cvat-core/src/about';
 
 const cvat: CVATCore = _cvat;
 
@@ -68,6 +72,8 @@ export {
     AnnotationGuide,
     Attribute,
     ShapeType,
+    Source,
+    ObjectType,
     LabelType,
     Storage,
     Webhook,
@@ -81,17 +87,19 @@ export {
     MLModel,
     ModelKind,
     ModelProviders,
-    ModelReturnType,
     DimensionType,
     Dumper,
     JobType,
     JobStage,
     JobState,
     RQStatus,
-    BaseSingleFrameAction,
+    BaseAction,
+    BaseShapesAction,
+    BaseCollectionAction,
     QualityReport,
     QualityConflict,
     QualitySettings,
+    ConsensusSettings,
     TargetMetric,
     AnnotationConflict,
     ConflictSeverity,
@@ -104,20 +112,22 @@ export {
     Event,
     FrameData,
     ActionParameterType,
-    FrameSelectionType,
     Request,
     JobValidationLayout,
     TaskValidationLayout,
+    StorageLocation,
+    AboutData,
 };
 
 export type {
     SerializedAttribute,
     SerializedLabel,
     StorageData,
-    ModelProvider,
     APIWrapperEnterOptions,
     QualitySummary,
     CVATCore,
     SerializedAPISchema,
     ProjectOrTaskOrJob,
+    RequestOperation,
+    UpdateStatusData,
 };

@@ -102,7 +102,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.8'
+          python-version: '3.9'
 
       - name: Download CVAT server image
         uses: actions/download-artifact@v4
@@ -156,7 +156,7 @@ jobs:
       - name: Install SDK
         run: |
           pip3 install -r ./tests/python/requirements.txt \
-            -e './cvat-sdk[pytorch]' -e ./cvat-cli \
+            -e './cvat-sdk[masks,pytorch]' -e ./cvat-cli \
             --extra-index-url https://download.pytorch.org/whl/cpu
 
       - name: Running REST API and SDK tests
@@ -223,9 +223,6 @@ jobs:
           docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.ci.yml run cvat_ci /bin/bash \
             -c 'python manage.py test cvat/apps -v 2'
 
-          docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.ci.yml run cvat_ci /bin/bash \
-            -c 'DISABLE_HUSKY=1 yarn --frozen-lockfile && yarn workspace cvat-core run test'
-
       - name: Creating a log file from cvat containers
         if: failure()
         env:
@@ -259,7 +256,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-            node-version: '16.x'
+            node-version: '22.x'
 
       - name: Download CVAT server image
         uses: actions/download-artifact@v4

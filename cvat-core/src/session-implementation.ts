@@ -1,5 +1,5 @@
 // Copyright (C) 2019-2022 Intel Corporation
-// Copyright (C) 2022-2024 CVAT.ai Corporation
+// Copyright (C) CVAT.ai Corporation
 //
 // SPDX-License-Identifier: MIT
 
@@ -23,7 +23,6 @@ import {
     findFrame,
     getContextImage,
     patchMeta,
-    getDeletedFrames,
     decodePreview,
 } from './frames';
 import Issue from './issue';
@@ -265,7 +264,7 @@ export function implementJob(Job: typeof JobClass): typeof JobClass {
         value: function includedFramesImplementation(
             this: JobClass,
         ): ReturnType<typeof JobClass.prototype.frames.frameNumbers> {
-            return Promise.resolve(getJobFrameNumbers(this.id));
+            return getJobFrameNumbers(this.id);
         },
     });
 
@@ -352,11 +351,6 @@ export function implementJob(Job: typeof JobClass): typeof JobClass {
             }
 
             const annotationsData = await getAnnotations(this, frame, allTracks, filters);
-            const deletedFrames = await getDeletedFrames('job', this.id);
-            if (frame in deletedFrames) {
-                return [];
-            }
-
             return annotationsData;
         },
     });
@@ -519,6 +513,18 @@ export function implementJob(Job: typeof JobClass): typeof JobClass {
         },
     });
 
+    Object.defineProperty(Job.prototype.annotations.commit, 'implementation', {
+        value: function commitAnnotationsImplementation(
+            this: JobClass,
+            added: Parameters<typeof JobClass.prototype.annotations.commit>[0],
+            removed: Parameters<typeof JobClass.prototype.annotations.commit>[1],
+            frame: Parameters<typeof JobClass.prototype.annotations.commit>[2],
+        ): ReturnType<typeof JobClass.prototype.annotations.commit> {
+            getCollection(this).commit(added, removed, frame);
+            return Promise.resolve();
+        },
+    });
+
     Object.defineProperty(Job.prototype.annotations.upload, 'implementation', {
         value: async function uploadAnnotationsImplementation(
             this: JobClass,
@@ -607,6 +613,14 @@ export function implementJob(Job: typeof JobClass): typeof JobClass {
                 },
                 wait,
             );
+        },
+    });
+
+    Object.defineProperty(Job.prototype.mergeConsensusJobs, 'implementation', {
+        value: function mergeConsensusJobsImplementation(
+            this: JobClass,
+        ): ReturnType<typeof JobClass.prototype.mergeConsensusJobs> {
+            return serverProxy.jobs.mergeConsensusJobs(this.id, 'job');
         },
     });
 
@@ -736,6 +750,10 @@ export function implementTask(Task: typeof TaskClass): typeof TaskClass {
                 taskSpec.source_storage = this.sourceStorage.toJSON();
             }
 
+            if (fields.consensus_replicas) {
+                taskSpec.consensus_replicas = fields.consensus_replicas;
+            }
+
             const taskDataSpec = {
                 client_files: this.clientFiles,
                 server_files: this.serverFiles,
@@ -756,12 +774,12 @@ export function implementTask(Task: typeof TaskClass): typeof TaskClass {
             const { taskID, rqID } = await serverProxy.tasks.create(
                 taskSpec,
                 taskDataSpec,
-                options?.requestStatusCallback || (() => {}),
+                options?.updateStatusCallback || (() => {}),
             );
 
             await requestsManager.listen(rqID, {
                 callback: (request: Request) => {
-                    options?.requestStatusCallback(request);
+                    options?.updateStatusCallback(request);
                     if (request.status === RQStatus.FAILED) {
                         serverProxy.tasks.delete(taskID, config.organization.organizationSlug || null);
                     }
@@ -804,6 +822,14 @@ export function implementTask(Task: typeof TaskClass): typeof TaskClass {
             this: TaskClass,
         ): ReturnType<typeof TaskClass.prototype.delete> {
             return serverProxy.tasks.delete(this.id);
+        },
+    });
+
+    Object.defineProperty(Task.prototype.mergeConsensusJobs, 'implementation', {
+        value: function mergeConsensusJobsImplementation(
+            this: TaskClass,
+        ): ReturnType<typeof TaskClass.prototype.mergeConsensusJobs> {
+            return serverProxy.tasks.mergeConsensusJobs(this.id, 'task');
         },
     });
 
@@ -875,6 +901,14 @@ export function implementTask(Task: typeof TaskClass): typeof TaskClass {
         value: async function cachedChunksImplementation(
             this: TaskClass,
         ): ReturnType<typeof TaskClass.prototype.frames.cachedChunks> {
+            throw new Error('Not implemented for Task');
+        },
+    });
+
+    Object.defineProperty(Task.prototype.frames.frameNumbers, 'implementation', {
+        value: function includedFramesImplementation(
+            this: TaskClass,
+        ): ReturnType<typeof TaskClass.prototype.frames.frameNumbers> {
             throw new Error('Not implemented for Task');
         },
     });
@@ -1021,11 +1055,6 @@ export function implementTask(Task: typeof TaskClass): typeof TaskClass {
             }
 
             const result = await getAnnotations(this, frame, allTracks, filters);
-            const deletedFrames = await getDeletedFrames('task', this.id);
-            if (frame in deletedFrames) {
-                return [];
-            }
-
             return result;
         },
     });
@@ -1197,6 +1226,18 @@ export function implementTask(Task: typeof TaskClass): typeof TaskClass {
             this: TaskClass,
         ): ReturnType<typeof TaskClass.prototype.annotations.export> {
             return Promise.resolve(getCollection(this).export());
+        },
+    });
+
+    Object.defineProperty(Task.prototype.annotations.commit, 'implementation', {
+        value: function commitAnnotationsImplementation(
+            this: TaskClass,
+            added: Parameters<typeof TaskClass.prototype.annotations.commit>[0],
+            removed: Parameters<typeof TaskClass.prototype.annotations.commit>[1],
+            frame: Parameters<typeof TaskClass.prototype.annotations.commit>[2],
+        ): ReturnType<typeof TaskClass.prototype.annotations.commit> {
+            getCollection(this).commit(added, removed, frame);
+            return Promise.resolve();
         },
     });
 

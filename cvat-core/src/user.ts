@@ -1,5 +1,5 @@
 // Copyright (C) 2019-2022 Intel Corporation
-// Copyright (C) 2022-2024 CVAT.ai Corporation
+// Copyright (C) CVAT.ai Corporation
 //
 // SPDX-License-Identifier: MIT
 
@@ -11,7 +11,7 @@ export default class User {
     public readonly email: string;
     public readonly firstName: string;
     public readonly lastName: string;
-    public readonly groups: ('user' | 'business' | 'admin')[];
+    public readonly groups: ('user' | 'admin')[];
     public readonly lastLogin: string;
     public readonly dateJoined: string;
     public readonly isStaff: boolean;

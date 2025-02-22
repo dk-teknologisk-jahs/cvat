@@ -1,43 +1,45 @@
 # Copyright (C) 2020-2022 Intel Corporation
-# Copyright (C) 2024 CVAT.ai Corporation
+# Copyright (C) CVAT.ai Corporation
 #
 # SPDX-License-Identifier: MIT
 
 import ast
-import cv2 as cv
-from collections import namedtuple
 import hashlib
 import importlib
+import logging
+import os
+import platform
+import re
+import subprocess
 import sys
 import traceback
-from contextlib import suppress, nullcontext
-from typing import Any, Dict, Optional, Callable, Sequence, Union
-import subprocess
-import os
 import urllib.parse
-import re
-import logging
-import platform
-
-from attr.converters import to_bool
-from datumaro.util.os_util import walk
-from rq.job import Job, Dependency
-from django_rq.queues import DjangoRQ
+from collections import namedtuple
+from collections.abc import Generator, Iterable, Mapping, Sequence
+from contextlib import nullcontext, suppress
+from itertools import islice
+from multiprocessing import cpu_count
 from pathlib import Path
+from typing import Any, Callable, Optional, TypeVar, Union
 
-from django.http.request import HttpRequest
+import cv2 as cv
+from attr.converters import to_bool
+from av import VideoFrame
+from datumaro.util.os_util import walk
+from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.utils.http import urlencode
-from rest_framework.reverse import reverse as _reverse
-
-from av import VideoFrame
-from PIL import Image
-from multiprocessing import cpu_count
-
-from django.core.exceptions import ValidationError
+from django_rq.queues import DjangoRQ
 from django_sendfile import sendfile as _sendfile
-from django.conf import settings
+from PIL import Image
 from redis.lock import Lock
+from rest_framework.reverse import reverse as _reverse
+from rq.job import Dependency as RQDependency
+from rq.job import Job as RQJob
+from rq.registry import BaseRegistry as RQBaseRegistry
+
+from cvat.apps.engine.types import ExtendedRequest
 
 Import = namedtuple("Import", ["module", "name", "alias"])
 
@@ -97,6 +99,9 @@ def execute_python_code(source_code, global_vars=None, local_vars=None):
         line_number = traceback.extract_tb(tb)[-1][1]
         raise InterpreterError("{} at line {}: {}".format(error_class, line_number, details))
 
+class CvatChunkTimestampMismatchError(Exception):
+    pass
+
 def av_scan_paths(*paths):
     if 'yes' == os.environ.get('CLAM_AV'):
         command = ['clamscan', '--no-summary', '-i', '-o']
@@ -133,7 +138,7 @@ def parse_specific_attributes(specific_attributes):
     } if parsed_specific_attributes else dict()
 
 
-def parse_exception_message(msg):
+def parse_exception_message(msg: str) -> str:
     parsed_msg = msg
     try:
         if 'ErrorDetail' in msg:
@@ -146,7 +151,7 @@ def parse_exception_message(msg):
         pass
     return parsed_msg
 
-def process_failed_job(rq_job: Job):
+def process_failed_job(rq_job: RQJob) -> str:
     exc_info = str(rq_job.exc_info or '')
     rq_job.delete()
 
@@ -161,33 +166,42 @@ def define_dependent_job(
     user_id: int,
     should_be_dependent: bool = settings.ONE_RUNNING_JOB_IN_QUEUE_PER_USER,
     *,
-    rq_id: Optional[str] = None,
-) -> Optional[Dependency]:
+    rq_id: str | None = None,
+) -> RQDependency | None:
     if not should_be_dependent:
         return None
 
-    queues = [queue.deferred_job_registry, queue, queue.started_job_registry]
+    queues: list[RQBaseRegistry | DjangoRQ] = [queue.deferred_job_registry, queue, queue.started_job_registry]
     # Since there is no cleanup implementation in DeferredJobRegistry,
     # this registry can contain "outdated" jobs that weren't deleted from it
     # but were added to another registry. Probably such situations can occur
     # if there are active or deferred jobs when restarting the worker container.
     filters = [lambda job: job.is_deferred, lambda _: True, lambda _: True]
-    all_user_jobs = []
+    all_user_jobs: list[RQJob] = []
     for q, f in zip(queues, filters):
         job_ids = q.get_job_ids()
         jobs = q.job_class.fetch_many(job_ids, q.connection)
         jobs = filter(lambda job: job and job.meta.get("user", {}).get("id") == user_id and f(job), jobs)
         all_user_jobs.extend(jobs)
 
-    # prevent possible cyclic dependencies
     if rq_id:
+        # Prevent cases where an RQ job depends on itself.
+        # It isn't possible to have multiple RQ jobs with the same ID in Redis.
+        # However, a race condition in request processing can lead to self-dependencies
+        # when 2 parallel requests attempt to enqueue RQ jobs with the same ID.
+        # This happens if an rq_job is fetched without a lock,
+        # but a lock is used when defining the dependent job and enqueuing a new one.
+        if any(rq_id == job.id for job in all_user_jobs):
+            return None
+
+        # prevent possible cyclic dependencies
         all_job_dependency_ids = {
             dep_id.decode()
             for job in all_user_jobs
             for dep_id in job.dependency_ids or ()
         }
 
-        if Job.redis_job_namespace_prefix + rq_id in all_job_dependency_ids:
+        if RQJob.redis_job_namespace_prefix + rq_id in all_job_dependency_ids:
             return None
 
     user_jobs = [
@@ -195,27 +209,38 @@ def define_dependent_job(
         if not job.meta.get(KEY_TO_EXCLUDE_FROM_DEPENDENCY)
     ]
 
-    return Dependency(jobs=[sorted(user_jobs, key=lambda job: job.created_at)[-1]], allow_failure=True) if user_jobs else None
+    return RQDependency(jobs=[sorted(user_jobs, key=lambda job: job.created_at)[-1]], allow_failure=True) if user_jobs else None
 
 
-def get_rq_lock_by_user(queue: DjangoRQ, user_id: int) -> Union[Lock, nullcontext]:
+def get_rq_lock_by_user(queue: DjangoRQ, user_id: int, *, timeout: Optional[int] = 30, blocking_timeout: Optional[int] = None) -> Union[Lock, nullcontext]:
     if settings.ONE_RUNNING_JOB_IN_QUEUE_PER_USER:
-        return queue.connection.lock(f'{queue.name}-lock-{user_id}', timeout=30)
+        return queue.connection.lock(
+            name=f'{queue.name}-lock-{user_id}',
+            timeout=timeout,
+            blocking_timeout=blocking_timeout,
+        )
     return nullcontext()
 
-def get_rq_lock_for_job(queue: DjangoRQ, rq_id: str) -> Lock:
+def get_rq_lock_for_job(queue: DjangoRQ, rq_id: str, *, timeout: int = 60, blocking_timeout: int = 50) -> Lock:
     # lock timeout corresponds to the nginx request timeout (proxy_read_timeout)
-    return queue.connection.lock(f'lock-for-job-{rq_id}'.lower(), timeout=60)
+
+    assert timeout is not None
+    assert blocking_timeout is not None
+    return queue.connection.lock(
+        name=f'lock-for-job-{rq_id}'.lower(),
+        timeout=timeout,
+        blocking_timeout=blocking_timeout,
+    )
 
 def get_rq_job_meta(
-    request: HttpRequest,
+    request: ExtendedRequest,
     db_obj: Any,
     *,
     result_url: Optional[str] = None,
 ):
     # to prevent circular import
-    from cvat.apps.webhooks.signals import project_id, organization_id
-    from cvat.apps.events.handlers import task_id, job_id, organization_slug
+    from cvat.apps.events.handlers import job_id, organization_slug, task_id
+    from cvat.apps.webhooks.signals import organization_id, project_id
 
     oid = organization_id(db_obj)
     oslug = organization_slug(db_obj)
@@ -247,8 +272,8 @@ def get_rq_job_meta(
     return meta
 
 def reverse(viewname, *, args=None, kwargs=None,
-    query_params: Optional[Dict[str, str]] = None,
-    request: Optional[HttpRequest] = None,
+    query_params: Optional[dict[str, str]] = None,
+    request: ExtendedRequest | None = None,
 ) -> str:
     """
     The same as rest_framework's reverse(), but adds custom query params support.
@@ -263,10 +288,10 @@ def reverse(viewname, *, args=None, kwargs=None,
 
     return url
 
-def get_server_url(request: HttpRequest) -> str:
+def get_server_url(request: ExtendedRequest) -> str:
     return request.build_absolute_uri('/')
 
-def build_field_filter_params(field: str, value: Any) -> Dict[str, str]:
+def build_field_filter_params(field: str, value: Any) -> dict[str, str]:
     """
     Builds a collection filter query params for a single field and value.
     """
@@ -334,7 +359,7 @@ def make_attachment_file_name(filename: str) -> str:
     return filename
 
 def sendfile(
-    request, filename,
+    request: ExtendedRequest, filename,
     attachment=False, attachment_filename=None, mimetype=None, encoding=None
 ):
     """
@@ -363,10 +388,6 @@ def sendfile(
 
     return _sendfile(request, filename, attachment, attachment_filename, mimetype, encoding)
 
-def load_image(image: tuple[str, str, str])-> tuple[Image.Image, str, str]:
-    pil_img = Image.open(image[0])
-    pil_img.load()
-    return pil_img, image[1], image[2]
 
 def build_backup_file_name(
     *,
@@ -411,13 +432,25 @@ def directory_tree(path, max_depth=None) -> str:
             tree += f"{indent}-{file}\n"
     return tree
 
-def is_dataset_export(request: HttpRequest) -> bool:
+def is_dataset_export(request: ExtendedRequest) -> bool:
     return to_bool(request.query_params.get('save_images', False))
 
+_T = TypeVar('_T')
 
-def chunked_list(lst, chunk_size):
-    for i in range(0, len(lst), chunk_size):
-        yield lst[i:i + chunk_size]
+def take_by(iterable: Iterable[_T], chunk_size: int) -> Generator[list[_T], None, None]:
+    """
+    Returns elements from the input iterable by batches of N items.
+    ('abcdefg', 3) -> ['a', 'b', 'c'], ['d', 'e', 'f'], ['g']
+    """
+    # can be changed to itertools.batched after migration to python3.12
+
+    it = iter(iterable)
+    while True:
+        batch = list(islice(it, chunk_size))
+        if len(batch) == 0:
+            break
+
+        yield batch
 
 
 FORMATTED_LIST_DISPLAY_THRESHOLD = 10
@@ -436,3 +469,32 @@ def format_list(
         separator.join(items[:max_items]),
         f" (and {remainder_count} more)" if 0 < remainder_count else "",
     )
+
+
+_K = TypeVar("_K")
+_V = TypeVar("_V")
+
+
+def grouped(items: Iterable[_V], *, key: Callable[[_V], _K]) -> Mapping[_K, Sequence[_V]]:
+    """
+    Returns a mapping with input iterable elements grouped by key, for example:
+
+    grouped(
+        [("apple1", "red"), ("apple2", "green"), ("apple3", "red")],
+        key=lambda v: v[1]
+    )
+    ->
+    {
+        "red": [("apple1", "red"), ("apple3", "red")],
+        "green": [("apple2", "green")]
+    }
+
+    Similar to itertools.groupby, but allows reiteration on resulting groups.
+    """
+
+    # Can be implemented with itertools.groupby, but it requires extra sorting for input elements
+    grouped_items = {}
+    for item in items:
+        grouped_items.setdefault(key(item), []).append(item)
+
+    return grouped_items

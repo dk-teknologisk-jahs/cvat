@@ -1,5 +1,5 @@
 // Copyright (C) 2020-2022 Intel Corporation
-// Copyright (C) 2022-2024 CVAT.ai Corporation
+// Copyright (C) CVAT.ai Corporation
 //
 // SPDX-License-Identifier: MIT
 
@@ -8,7 +8,8 @@ import { Canvas, RectDrawingMethod, CuboidDrawingMethod } from 'cvat-canvas-wrap
 import {
     Webhook, MLModel, Organization, Job, Task, Project, Label, User,
     QualityConflict, FramesMetaData, RQStatus, Event, Invitation, SerializedAPISchema,
-    Request, JobValidationLayout, QualitySettings, TaskValidationLayout,
+    Request, JobValidationLayout, QualitySettings, TaskValidationLayout, ObjectState,
+    ConsensusSettings, AboutData,
 } from 'cvat-core-wrapper';
 import { IntelligentScissors } from 'utils/opencv-wrapper/intelligent-scissors';
 import { KeyMap, KeyMapItem } from 'utils/mousetrap-react';
@@ -38,6 +39,7 @@ interface Preview {
 }
 
 export interface ProjectsState {
+    fetchingTimestamp: number;
     initialized: boolean;
     fetching: boolean;
     count: number;
@@ -75,6 +77,7 @@ export interface JobsQuery {
 }
 
 export interface JobsState {
+    fetchingTimestamp: number;
     query: JobsQuery;
     fetching: boolean;
     count: number;
@@ -90,6 +93,7 @@ export interface JobsState {
 }
 
 export interface TasksState {
+    fetchingTimestamp: number;
     initialized: boolean;
     fetching: boolean;
     moveTask: {
@@ -165,6 +169,18 @@ export interface ImportState {
         };
     };
     instanceType: 'project' | 'task' | 'job' | null;
+}
+
+export interface ConsensusState {
+    fetching: boolean;
+    consensusSettings: ConsensusSettings | null;
+    taskInstance: Task | null;
+    jobInstance: Job | null;
+    actions: {
+        merging: {
+            [instanceKey: string]: boolean;
+        };
+    }
 }
 
 export interface FormatsState {
@@ -333,10 +349,8 @@ export interface PluginsState {
 }
 
 export interface AboutState {
-    server: any;
+    server: AboutData;
     packageVersion: {
-        core: string;
-        canvas: string;
         ui: string;
     };
     fetching: boolean;
@@ -475,6 +489,7 @@ export interface NotificationsState {
             exporting: null | ErrorState;
             importing: null | ErrorState;
             moving: null | ErrorState;
+            mergingConsensus: null | ErrorState;
         };
         jobs: {
             updating: null | ErrorState;
@@ -598,6 +613,7 @@ export interface NotificationsState {
             loadingDone: null | NotificationState;
             importingDone: null | NotificationState;
             movingDone: null | NotificationState;
+            mergingConsensusDone: null | NotificationState;
         };
         models: {
             inferenceDone: null | NotificationState;
@@ -694,6 +710,10 @@ export enum NavigationType {
     EMPTY = 'empty',
 }
 
+export interface EditingState {
+    objectState: ObjectState | null;
+}
+
 export interface AnnotationState {
     activities: {
         loads: {
@@ -719,6 +739,7 @@ export interface AnnotationState {
         instance: Canvas | Canvas3d | null;
         ready: boolean;
         activeControl: ActiveControl;
+        activeObjectHidden: boolean;
     };
     job: {
         openTime: null | number;
@@ -726,6 +747,7 @@ export interface AnnotationState {
         requestedId: number | null;
         meta: FramesMetaData | null;
         instance: Job | null | undefined;
+        frameNumbers: number[];
         queryParameters: {
             initialOpenGuide: boolean;
             defaultLabel: string | null;
@@ -760,7 +782,7 @@ export interface AnnotationState {
     drawing: {
         activeInteractor?: MLModel | OpenCVTool;
         activeInteractorParameters?: MLModel['params']['canvas'];
-        activeShapeType: ShapeType;
+        activeShapeType: ShapeType | null;
         activeRectDrawingMethod?: RectDrawingMethod;
         activeCuboidDrawingMethod?: CuboidDrawingMethod;
         activeNumOfPoints?: number;
@@ -768,6 +790,7 @@ export interface AnnotationState {
         activeObjectType: ObjectType;
         activeInitialState?: any;
     };
+    editing: EditingState;
     annotations: {
         activatedStateID: number | null;
         activatedElementID: number | null;
@@ -1010,6 +1033,7 @@ export interface CombinedState {
     review: ReviewState;
     export: ExportState;
     import: ImportState;
+    consensus: ConsensusState;
     cloudStorages: CloudStoragesState;
     organizations: OrganizationState;
     invitations: InvitationsState;
