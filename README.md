@@ -1,3 +1,58 @@
+# Changes from upstream at cvat-ai/cvat
+
+Merged https://github.com/cvat-ai/cvat/pull/8610 (hashJoe/cvat) into following stable versions:
+- v2.32.0-sam2
+
+## Git commands used to create this repo
+
+```bash
+# Clone your fork
+git clone https://github.com/YOUR-USERNAME/cvat.git
+cd cvat
+
+# Add required remotes
+git remote add upstream https://github.com/cvat-ai/cvat.git
+git remote add hashJoe https://github.com/hashJoe/cvat.git
+
+# Fetch everything
+git fetch --all --tags
+
+# Find latest stable version
+git tag -l | sort -V
+# Let's assume v2.32.0 is the latest stable
+
+# Create a branch based on this stable version
+git checkout -b v2.32.0-sam2 v2.32.0
+
+# Merge the SAM2 feature
+git merge hashJoe/feature/sam2
+
+# Resolve any conflicts if necessary
+# Then commit and push
+git push -u origin v2.32.0-sam2
+```
+
+## Git commands to update CVAT version
+
+When CVAT releases a new version (e.g. v2.45.0):
+
+```bash
+# Create a new branch from the new version
+git fetch upstream --tags
+git checkout -b v2.45.0-sam2 v2.45.0
+
+# Now either merge your previous customized branch
+git merge stable-sam2
+
+# Or alternatively, reapply the SAM2 changes, assuming no other commits are needed
+git merge hashJoe/feature/sam2
+
+# Resolve conflicts, test, then push
+git push -u origin v2.45.0-sam2
+```
+
+This approach gives a clean upgrade path while maintaining the customizations.
+
 <p align="center">
   <img src="/site/content/en/images/cvat-readme-gif.gif" alt="CVAT Platform" width="100%" max-width="800px">
 </p>
