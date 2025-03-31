@@ -1,6 +1,6 @@
 # Changes from upstream at cvat-ai/cvat
 
-Merged https://github.com/cvat-ai/cvat/pull/8610 (hashJoe/cvat) into following stable versions:
+Merged https://github.com/cvat-ai/cvat/pull/8610 (hashJoe/cvat:feature/sam2) into following stable versions:
 - v2.32.0-sam2
 
 ## Git commands used to create this repo
