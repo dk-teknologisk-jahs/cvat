@@ -42,7 +42,7 @@ git fetch upstream --tags
 git checkout -b v2.45.0-sam2 v2.45.0
 
 # Now either merge your previous customized branch
-git merge stable-sam2
+git merge v2.32.0-sam2
 
 # Or alternatively, reapply the SAM2 changes, assuming no other commits are needed
 git merge hashJoe/feature/sam2
