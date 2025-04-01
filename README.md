@@ -1,13 +1,32 @@
 # Changes from upstream at cvat-ai/cvat
 
-Merged https://github.com/cvat-ai/cvat/pull/8610 (hashJoe/cvat:feature/sam2) into following stable versions:
+Merged https://github.com/cvat-ai/cvat/pull/8610 (hashJoe/cvat:feature/sam2) and added some convenience files for running AI models on a separate server into following stable versions:
 - [v2.32.0-sam2](https://github.com/dk-teknologisk-jahs/cvat/tree/v2.32.0-sam2)
+
+## Running CVAT w. changes
+
+```bash
+# Clone our fork
+git clone https://github.com/dk-teknologisk-jahs/cvat.git
+cd cvat
+
+# Switch to branch with changes and run CVAT
+
+```bash
+# Switch to the branch with changes
+git switch v2.32.0-sam2
+
+# Check .env and change variables as necessary
+
+# Start CVAT using the provided compose files (compose.yaml should be default)
+docker compose up -d --build --force-recreate --renew-anon-volumes
+```
 
 ## Git commands used to create this repo
 
 ```bash
-# Clone your fork
-git clone https://github.com/YOUR-USERNAME/cvat.git
+# Clone our fork
+git clone https://github.com/dk-teknologisk-jahs/cvat.git
 cd cvat
 
 # Add required remotes
@@ -121,9 +140,43 @@ git push -u origin v2.45.0-sam2
 
 This approach gives a clean upgrade path while maintaining the customizations.
 
-## Example of running SAM2 interactor as serverless function on separate PC (w. IP: 172.17.155.175) with GPU and lots of RAM:
+## Example of running SAM2 on CPU as serverless function on the same PC as CVAT:
 
-Run on server to setup custom serverless SAM2 plugin:
+Run on the same PC to set up the SAM2 serverless plugin:
+
+```bash
+# Set variables
+CVAT_ROOT_DIR=/home/jahs/GitHub/cvat
+NUCLIO_BIN_DIR=/home/jahs/GitHub/bin
+USE_NUCLIO_VERSION=1.14.0 # Should match nuclio version used by CVAT
+
+# Get nuctl executable
+mkdir -p "$NUCLIO_BIN_DIR"
+cd "$NUCLIO_BIN_DIR"
+wget "https://github.com/nuclio/nuclio/releases/download/$USE_NUCLIO_VERSION/nuctl-$USE_NUCLIO_VERSION-linux-amd64"
+ln -sf "nuctl-$USE_NUCLIO_VERSION-linux-amd64" nuctl
+
+cd "$CVAT_ROOT_DIR"
+
+# Create & start SAM2 serverless function
+PATH="$NUCLIO_BIN_DIR:$PATH" ./serverless/deploy_cpu.sh serverless/pytorch/facebookresearch/sam2
+```
+
+This setup assumes that CVAT and the SAM2 serverless function are running on the same machine. Ensure that the `.env` file is configured correctly with `CVAT_NUCLIO_HOST=localhost`.
+
+Remember to stop and restart CVAT:
+
+```bash
+# Stop and remove existing containers
+docker compose down
+
+# Rebuild and restart containers
+docker compose up -d --build --force-recreate --renew-anon-volumes
+```
+
+## Example of running SAM2 on GPU as serverless function on separate PC (w. IP: 172.17.155.175):
+
+Run on separate server from CVAT server:
 
 ```bash
 # Set variables
