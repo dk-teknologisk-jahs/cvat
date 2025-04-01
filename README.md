@@ -10,19 +10,16 @@ Merged https://github.com/cvat-ai/cvat/pull/8610 (hashJoe/cvat:feature/sam2) and
 git clone https://github.com/dk-teknologisk-jahs/cvat.git
 cd cvat
 
-# Switch to branch with changes and run CVAT
-
-```bash
-# Switch to the branch with changes
+# Switch to branch with changes
 git switch v2.32.0-sam2
 
 # Check .env and change variables as necessary
 
-# Start CVAT using the provided compose files (compose.yaml should be default)
+# Build & Start CVAT using the provided compose files (compose.yaml should be default, add -f compose.yaml if not)
 docker compose up -d --build --force-recreate --renew-anon-volumes
 ```
 
-## Git commands used to create this repo
+## Commands used to create this repo
 
 ```bash
 # Clone our fork
@@ -158,7 +155,7 @@ ln -sf "nuctl-$USE_NUCLIO_VERSION-linux-amd64" nuctl
 
 cd "$CVAT_ROOT_DIR"
 
-# Create & start SAM2 serverless function
+# Create & start SAM2 serverless function on CPU
 PATH="$NUCLIO_BIN_DIR:$PATH" ./serverless/deploy_cpu.sh serverless/pytorch/facebookresearch/sam2
 ```
 
@@ -196,7 +193,7 @@ git clone https://github.com/dk-teknologisk-jahs/cvat.git "$CVAT_ROOT_DIR"
 cd "$CVAT_ROOT_DIR"
 git switch v2.32.0-sam2
 
-# Create & start SAM2 serverless function and dashboard
+# Create & start SAM2 serverless function on GPU and dashboard server
 docker network create cvat_cvat
 PATH="$NUCLIO_BIN_DIR:$PATH" ./serverless/deploy_gpu.sh serverless/pytorch/facebookresearch/sam2
 docker run -p 8070:8070 \
