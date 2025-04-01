@@ -34,18 +34,55 @@ git push -u origin v2.32.0-sam2
 
 ## Git commands to update CVAT version
 
-When CVAT releases a new version (e.g. v2.45.0):
+When CVAT releases a new version (e.g. v2.45.0), you can either just merge the changes since the last stable version:
 
 ```bash
-# Create a new branch from the new version
+# Create a new branch from the last stable version (v2.32.0-sam2 in this case)
 git fetch upstream --tags
-git checkout -b v2.45.0-sam2 v2.45.0
+git checkout -b v2.45.0-sam2 v2.32.0-sam2
 
-# Now either merge your previous customized branch
-git merge v2.32.0-sam2
+# Now merge the changes since last stable version
+git merge upstream/v2.45.0
 
-# Or alternatively, reapply the SAM2 changes, assuming no other commits are needed
+# Resolve conflicts, test, then push
+git push -u origin v2.45.0-sam2
+```
+
+Or alternatively, start from scratch, reapply the SAM2 changes and add all necessary files:
+
+```bash
 git merge hashJoe/feature/sam2
+cat <<'EOF' >compose.yaml
+include:
+  - path:
+    - ./docker-compose.yml
+    #- ./docker-compose.dev.yml
+    - ./components/serverless/docker-compose.serverless.yml
+    - ./compose.override.yaml
+EOF
+cat <<'EOF' >compose.override.yaml
+services:
+  cvat_server:
+    environment:
+      CVAT_SERVERLESS: 1
+      CVAT_NUCLIO_HOST: ${CVAT_NUCLIO_HOST:-localhost}
+      CVAT_NUCLIO_INVOKE_METHOD: 'dashboard'
+
+  cvat_worker_annotation:
+    environment:
+      CVAT_NUCLIO_HOST: ${CVAT_NUCLIO_HOST:-localhost}
+      CVAT_NUCLIO_INVOKE_METHOD: 'dashboard'
+EOF
+cat <<'EOF' >.env
+CLIENT_PLUGINS=plugins/sam2
+CVAT_HOST=tjorn.local
+CVAT_VERSION=v2.32.0
+CVAT_SERVERLESS=1
+CVAT_NUCLIO_HOST=172.17.155.175 # set to localhost if using local nuclio instead of remote server for models
+CVAT_NUCLIO_INVOKE_METHOD=dashboard
+EOF
+git add compose.yaml compose.override.yaml .env
+git commit -m 'Added compose.yml, compose.override.yaml and .env'
 
 # Resolve conflicts, test, then push
 git push -u origin v2.45.0-sam2
