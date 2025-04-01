@@ -1,0 +1,11 @@
+services:
+  cvat_server:
+    environment:
+      CVAT_SERVERLESS: 1
+      CVAT_NUCLIO_HOST: ${CVAT_NUCLIO_HOST:-localhost}
+      CVAT_NUCLIO_INVOKE_METHOD: 'dashboard'
+
+  cvat_worker_annotation:
+    environment:
+      CVAT_NUCLIO_HOST: ${CVAT_NUCLIO_HOST:-localhost}
+      CVAT_NUCLIO_INVOKE_METHOD: 'dashboard'
