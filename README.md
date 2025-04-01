@@ -1,7 +1,7 @@
 # Changes from upstream at cvat-ai/cvat
 
 Merged https://github.com/cvat-ai/cvat/pull/8610 (hashJoe/cvat:feature/sam2) into following stable versions:
-- v2.32.0-sam2
+- [v2.32.0-sam2](https://github.com/dk-teknologisk-jahs/cvat/tree/v2.32.0-sam2)
 
 ## Git commands used to create this repo
 
@@ -52,6 +52,40 @@ git push -u origin v2.45.0-sam2
 ```
 
 This approach gives a clean upgrade path while maintaining the customizations.
+
+## Example of running SAM2 interactor as serverless function on separate PC (w. IP: 172.17.155.175) with GPU and lots of RAM:
+
+Run on server to setup custom serverless SAM2 plugin:
+
+```bash
+# Set variables
+CVAT_ROOT_DIR=/home/kristian/GitHub/cvat
+NUCLIO_BIN_DIR=/home/kristian/GitHub/bin
+USE_NUCLIO_VERSION=1.14.0 # Should match nuclio version used by CVAT
+USE_NUCLIO_ADDRESS=172.17.155.175 # set to actual IP of GPU server
+
+# Get nuctl executable
+mkdir "$NUCLIO_BIN_DIR"
+cd "$NUCLIO_BIN_DIR"
+wget "https://github.com/nuclio/nuclio/releases/download/$USE_NUCLIO_VERSION/nuctl-$USE_NUCLIO_VERSION-linux-amd64"
+ln -sf "nuctl-$USE_NUCLIO_VERSION-linux-amd64" nuctl
+
+# Get our CVAT fork and switch to branch with SAM2
+git clone https://github.com/dk-teknologisk-jahs/cvat.git "$CVAT_ROOT_DIR"
+cd "$CVAT_ROOT_DIR"
+git switch v2.32.0-sam2
+
+# Create & start SAM2 serverless function and dashboard
+docker network create cvat_cvat
+PATH="$NUCLIO_BIN_DIR:$PATH" ./serverless/deploy_gpu.sh serverless/pytorch/facebookresearch/sam2
+docker run -p 8070:8070 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e NUCLIO_DASHBOARD_EXTERNAL_IP_ADDRESSES=$USE_NUCLIO_ADDRESS \
+  --network cvat_cvat \
+  quay.io/nuclio/dashboard:$USE_NUCLIO_VERSION-amd64
+```
+
+# Original README from here on
 
 <p align="center">
   <img src="/site/content/en/images/cvat-readme-gif.gif" alt="CVAT Platform" width="100%" max-width="800px">
