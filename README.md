@@ -27,6 +27,38 @@ git checkout -b v2.32.0-sam2 v2.32.0
 # Merge the SAM2 feature
 git merge hashJoe/feature/sam2
 
+# Add necessary files
+cat <<'EOF' >compose.yaml
+include:
+  - path:
+    - ./docker-compose.yml
+    #- ./docker-compose.dev.yml # should not be necessary (warning: will expose stuff like the database on port 5432)
+    - ./components/serverless/docker-compose.serverless.yml
+    - ./compose.override.yaml
+EOF
+cat <<'EOF' >compose.override.yaml
+services:
+  cvat_server:
+    environment:
+      CVAT_SERVERLESS: 1
+      CVAT_NUCLIO_HOST: ${CVAT_NUCLIO_HOST:-localhost}
+      CVAT_NUCLIO_INVOKE_METHOD: 'dashboard'
+
+  cvat_worker_annotation:
+    environment:
+      CVAT_NUCLIO_HOST: ${CVAT_NUCLIO_HOST:-localhost}
+      CVAT_NUCLIO_INVOKE_METHOD: 'dashboard'
+EOF
+cat <<'EOF' >.env
+CLIENT_PLUGINS=plugins/sam2
+CVAT_HOST=tjorn.local # CVAT has some issues with 404 erros if we don't set this
+CVAT_SERVERLESS=1
+CVAT_NUCLIO_HOST=172.17.155.175 # set to localhost if using local nuclio
+CVAT_NUCLIO_INVOKE_METHOD=dashboard
+EOF
+git add -f compose.yaml compose.override.yaml .env
+git commit -m 'Added compose.yml, compose.override.yaml and .env'
+
 # Resolve any conflicts if necessary
 # Then commit and push
 git push -u origin v2.32.0-sam2
@@ -56,7 +88,7 @@ cat <<'EOF' >compose.yaml
 include:
   - path:
     - ./docker-compose.yml
-    #- ./docker-compose.dev.yml
+    #- ./docker-compose.dev.yml # should not be necessary (warning: will expose stuff like the database on port 5432)
     - ./components/serverless/docker-compose.serverless.yml
     - ./compose.override.yaml
 EOF
@@ -75,13 +107,12 @@ services:
 EOF
 cat <<'EOF' >.env
 CLIENT_PLUGINS=plugins/sam2
-CVAT_HOST=tjorn.local
-CVAT_VERSION=v2.32.0
+CVAT_HOST=tjorn.local # CVAT has some issues with 404 erros if we don't set this
 CVAT_SERVERLESS=1
-CVAT_NUCLIO_HOST=172.17.155.175 # set to localhost if using local nuclio instead of remote server for models
+CVAT_NUCLIO_HOST=172.17.155.175 # set to localhost if using local nuclio
 CVAT_NUCLIO_INVOKE_METHOD=dashboard
 EOF
-git add compose.yaml compose.override.yaml .env
+git add -f compose.yaml compose.override.yaml .env
 git commit -m 'Added compose.yml, compose.override.yaml and .env'
 
 # Resolve conflicts, test, then push
