@@ -95,7 +95,7 @@ spec:
   eventTimeout: 30s
   build:
     image: cvat.onnx.wongkinyiu.yolov7:latest-gpu
-    baseImage: nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
+    baseImage: nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
     directives:
       preCopy:
