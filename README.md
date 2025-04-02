@@ -1,9 +1,13 @@
 # Changes from upstream at cvat-ai/cvat
 
-Merged https://github.com/cvat-ai/cvat/pull/8610 (hashJoe/cvat:feature/sam2) and added some convenience files for running AI models on a separate server into following stable versions:
+- Added convenience compose files and envvars to more easily run annotation models (nuclio serverless functions) either locally or on a separate server
+- Added deploy_cpu.ps1 and deploy_gpu.ps1 for easier Windows deployment of models
+- Added support for running SAM2 (Credit to [hashJoe/cvat:feature/sam2](https://github.com/cvat-ai/cvat/pull/8610))
+
+The following CVAT versions are available - see below for instructions on how to update to newer versions:
 - [v2.32.0-sam2](https://github.com/dk-teknologisk-jahs/cvat/tree/v2.32.0-sam2)
 
-## Running CVAT w. changes
+## Running this fork of CVAT
 
 ```bash
 # Clone our fork
@@ -15,11 +19,11 @@ git switch v2.32.0-sam2
 
 # Check .env and change variables as necessary
 
-# Build & Start CVAT using the provided compose files (compose.yaml should be default, add -f compose.yaml if not)
+# Build & Start CVAT using the provided compose files (should use compose.yaml by default, add -f compose.yaml if not)
 docker compose up -d --build --force-recreate --renew-anon-volumes
 ```
 
-## Commands used to create this repo
+## Commands used to create this fork
 
 ```bash
 # Clone our fork
@@ -43,7 +47,7 @@ git checkout -b v2.32.0-sam2 v2.32.0
 # Merge the SAM2 feature
 git merge hashJoe/feature/sam2
 
-# Add necessary files
+# Add necessary files to run CVAT with SAM2 and either local or remote nuclio server
 cat <<'EOF' >compose.yaml
 include:
   - path:
@@ -74,6 +78,85 @@ CVAT_NUCLIO_INVOKE_METHOD=dashboard
 EOF
 git add -f compose.yaml compose.override.yaml .env
 git commit -m 'Added compose.yml, compose.override.yaml and .env'
+
+# Add deploy_cpu.ps1 and deploy_gpu.ps1 for Windows deployment of models
+cat <<'EOF' >serverless/deploy_cpu.ps1
+# deploy_cpu.ps1
+# Sample commands to deploy nuclio functions on CPU
+
+# Enable stopping on errors
+$ErrorActionPreference = "Stop"
+
+# Get the script directory
+$SCRIPT_DIR = $PSScriptRoot
+$FUNCTIONS_DIR = if ($args[0]) { $args[0] } else { $SCRIPT_DIR }
+
+# Enable Docker BuildKit
+$env:DOCKER_BUILDKIT = 1
+
+# Build base OpenVINO image
+docker build -t cvat.openvino.base "$SCRIPT_DIR\openvino\base"
+
+# Create the CVAT project
+nuctl create project cvat --platform local
+
+# Find and deploy all function.yaml files
+Get-ChildItem -Path $FUNCTIONS_DIR -Recurse -Filter "function.yaml" | ForEach-Object {
+    $func_config = $_.FullName
+    $func_root = Split-Path -Parent $func_config
+
+    # Calculate relative path for display purposes
+    $func_parent_dir = Split-Path -Parent $func_root
+    $func_rel_path = (Resolve-Path -Relative $func_parent_dir -ErrorAction SilentlyContinue).TrimStart(".\")
+
+    # Build Docker image if Dockerfile exists
+    if (Test-Path -Path "$func_root\Dockerfile") {
+        $docker_tag = "cvat." + ($func_rel_path -replace "\\", ".") + ".base"
+        docker build -t $docker_tag $func_root
+    }
+
+    Write-Host "Deploying $func_rel_path function..."
+    nuctl deploy --project-name cvat --path $func_root `
+        --file $func_config --platform local `
+        --env CVAT_FUNCTIONS_REDIS_HOST=cvat_redis_ondisk `
+        --env CVAT_FUNCTIONS_REDIS_PORT=6666 `
+        --platform-config '{\"attributes\": {\"network\": \"cvat_cvat\"}}'
+}
+
+# List deployed functions
+nuctl get function --platform local
+EOF
+cat <<'EOF' >serverless/deploy_gpu.ps1
+# deploy_gpu.ps1 - Windows version of deploy_gpu.sh
+
+# Get the script directory
+$SCRIPT_DIR = $PSScriptRoot
+$FUNCTIONS_DIR = if ($args[0]) { $args[0] } else { $SCRIPT_DIR }
+
+# Create the CVAT project
+nuctl create project cvat --platform local
+
+# Find and deploy all function-gpu.yaml files
+Get-ChildItem -Path $FUNCTIONS_DIR -Recurse -Filter "function-gpu.yaml" | ForEach-Object {
+    $func_config = $_.FullName
+    $func_root = Split-Path -Parent $func_config
+
+    # Calculate relative path for display purposes
+    $func_rel_path = (Resolve-Path -Relative (Split-Path -Parent $func_root)).TrimStart(".\")
+
+    Write-Host "Deploying $func_rel_path function..."
+    nuctl deploy --project-name cvat --path $func_root `
+        --file $func_config --platform local `
+        --env CVAT_FUNCTIONS_REDIS_HOST=cvat_redis_ondisk `
+        --env CVAT_FUNCTIONS_REDIS_PORT=6666 `
+        --platform-config '{\"attributes\": {\"network\": \"cvat_cvat\"}}'
+}
+
+# List deployed functions
+nuctl get function --platform local
+EOF
+git add -f serverless/deploy_cpu.ps1 serverless/deploy_gpu.ps1
+git commit -m 'Added deploy_cpu.ps1 and deploy_gpu.ps1 for Windows'
 
 # Resolve any conflicts if necessary
 # Then commit and push
@@ -85,21 +168,41 @@ git push -u origin v2.32.0-sam2
 When CVAT releases a new version (e.g. v2.45.0), you can either just merge the changes since the last stable version:
 
 ```bash
-# Create a new branch from the last stable version (v2.32.0-sam2 in this case)
+# If you have made changes to the .env etc, make sure you are on the previous stable
+# version w. SAM2 (v2.32.0-sam2 in this case), so you can stash the local changes
+git checkout v2.32.0-sam2 # replace with the branch you are using now
+git stash push -m "Local changes"
+
+# Create a new branch from the previous stable version w. SAM2 (v2.32.0-sam2 in this case)
 git fetch upstream --tags
-git checkout -b v2.45.0-sam2 v2.32.0-sam2
+git checkout -b v2.45.0-sam2 v2.32.0-sam2 # replace with the new CVAT version you want to use and the branch you are using now
 
-# Now merge the changes since last stable version
-git merge upstream/v2.45.0
+# Now merge the changes since previous stable version
+git merge upstream/v2.45.0 # replace with the new CVAT version you want to use
 
-# Resolve conflicts, test, then push
-git push -u origin v2.45.0-sam2
+# Pop the stashed changes if necessary
+git stash apply stash^{/Local changes}
+
+# Resolve conflicts, test, then optionally push
+git push -u origin v2.45.0-sam2 # replace with the new CVAT version you want to use
 ```
 
 Or alternatively, start from scratch, reapply the SAM2 changes and add all necessary files:
 
 ```bash
+# If you have made changes to the .env etc, make sure you are on the previous stable
+# version w. SAM2 (v2.32.0-sam2 in this case), so you can stash the local changes
+git checkout v2.32.0-sam2 # replace with the branch you are using now
+git stash push -m "Local changes"
+
+# Create a new branch from the new stable version wo. SAM2 (v2.45.0 in this case)
+git fetch upstream --tags
+git checkout -b v2.45.0-sam2 upstream/v2.45.0 # replace with the new CVAT version you want to use and the branch you are using now
+
+# Now merge the changes from the SAM2 feature branch
 git merge hashJoe/feature/sam2
+
+# Add necessary files to run CVAT with SAM2 and either local or remote nuclio server
 cat <<'EOF' >compose.yaml
 include:
   - path:
@@ -131,8 +234,90 @@ EOF
 git add -f compose.yaml compose.override.yaml .env
 git commit -m 'Added compose.yml, compose.override.yaml and .env'
 
-# Resolve conflicts, test, then push
-git push -u origin v2.45.0-sam2
+# Add deploy_cpu.ps1 and deploy_gpu.ps1 for Windows deployment of models
+cat <<'EOF' >serverless/deploy_cpu.ps1
+# deploy_cpu.ps1
+# Sample commands to deploy nuclio functions on CPU
+
+# Enable stopping on errors
+$ErrorActionPreference = "Stop"
+
+# Get the script directory
+$SCRIPT_DIR = $PSScriptRoot
+$FUNCTIONS_DIR = if ($args[0]) { $args[0] } else { $SCRIPT_DIR }
+
+# Enable Docker BuildKit
+$env:DOCKER_BUILDKIT = 1
+
+# Build base OpenVINO image
+docker build -t cvat.openvino.base "$SCRIPT_DIR\openvino\base"
+
+# Create the CVAT project
+nuctl create project cvat --platform local
+
+# Find and deploy all function.yaml files
+Get-ChildItem -Path $FUNCTIONS_DIR -Recurse -Filter "function.yaml" | ForEach-Object {
+    $func_config = $_.FullName
+    $func_root = Split-Path -Parent $func_config
+
+    # Calculate relative path for display purposes
+    $func_parent_dir = Split-Path -Parent $func_root
+    $func_rel_path = (Resolve-Path -Relative $func_parent_dir -ErrorAction SilentlyContinue).TrimStart(".\")
+
+    # Build Docker image if Dockerfile exists
+    if (Test-Path -Path "$func_root\Dockerfile") {
+        $docker_tag = "cvat." + ($func_rel_path -replace "\\", ".") + ".base"
+        docker build -t $docker_tag $func_root
+    }
+
+    Write-Host "Deploying $func_rel_path function..."
+    nuctl deploy --project-name cvat --path $func_root `
+        --file $func_config --platform local `
+        --env CVAT_FUNCTIONS_REDIS_HOST=cvat_redis_ondisk `
+        --env CVAT_FUNCTIONS_REDIS_PORT=6666 `
+        --platform-config '{\"attributes\": {\"network\": \"cvat_cvat\"}}'
+}
+
+# List deployed functions
+nuctl get function --platform local
+EOF
+cat <<'EOF' >serverless/deploy_gpu.ps1
+# deploy_gpu.ps1 - Windows version of deploy_gpu.sh
+
+# Get the script directory
+$SCRIPT_DIR = $PSScriptRoot
+$FUNCTIONS_DIR = if ($args[0]) { $args[0] } else { $SCRIPT_DIR }
+
+# Create the CVAT project
+nuctl create project cvat --platform local
+
+# Find and deploy all function-gpu.yaml files
+Get-ChildItem -Path $FUNCTIONS_DIR -Recurse -Filter "function-gpu.yaml" | ForEach-Object {
+    $func_config = $_.FullName
+    $func_root = Split-Path -Parent $func_config
+
+    # Calculate relative path for display purposes
+    $func_rel_path = (Resolve-Path -Relative (Split-Path -Parent $func_root)).TrimStart(".\")
+
+    Write-Host "Deploying $func_rel_path function..."
+    nuctl deploy --project-name cvat --path $func_root `
+        --file $func_config --platform local `
+        --env CVAT_FUNCTIONS_REDIS_HOST=cvat_redis_ondisk `
+        --env CVAT_FUNCTIONS_REDIS_PORT=6666 `
+        --platform-config '{\"attributes\": {\"network\": \"cvat_cvat\"}}'
+}
+
+# List deployed functions
+nuctl get function --platform local
+EOF
+git add -f serverless/deploy_cpu.ps1 serverless/deploy_gpu.ps1
+git commit -m 'Added deploy_cpu.ps1 and deploy_gpu.ps1 for Windows'
+
+# Pop the stashed changes if necessary
+git stash apply stash^{/Local changes}
+
+# Resolve conflicts, test, then optionally push
+git push -u origin v2.45.0-sam2 # replace with the new CVAT version you want to use
 ```
 
 This approach gives a clean upgrade path while maintaining the customizations.
@@ -141,22 +326,61 @@ This approach gives a clean upgrade path while maintaining the customizations.
 
 Run on the same PC to set up the SAM2 serverless plugin:
 
+### For Linux PCs
+
 ```bash
 # Set variables
-CVAT_ROOT_DIR=/home/jahs/GitHub/cvat
-NUCLIO_BIN_DIR=/home/jahs/GitHub/bin
+CVAT_ROOT_DIR=/home/jahs/GitHub/cvat # Change this to your CVAT directory
+NUCLIO_BIN_DIR=/home/jahs/GitHub/bin # Change this to the directory where you want to store nuctl
 USE_NUCLIO_VERSION=1.14.0 # Should match nuclio version used by CVAT
 
-# Get nuctl executable
+# Create directory for nuctl if it doesn't exist
+mkdir -p "$NUCLIO_BIN_DIR"
+
+# Download nuctl executable
 mkdir -p "$NUCLIO_BIN_DIR"
 cd "$NUCLIO_BIN_DIR"
 wget "https://github.com/nuclio/nuclio/releases/download/$USE_NUCLIO_VERSION/nuctl-$USE_NUCLIO_VERSION-linux-amd64"
 ln -sf "nuctl-$USE_NUCLIO_VERSION-linux-amd64" nuctl
 
+# Navigate to CVAT root directory (assumes you are already on the correct branch, such as v2.32.0-sam2)
 cd "$CVAT_ROOT_DIR"
 
+# Add nuctl to PATH temporarily for this session
+export PATH="$NUCLIO_BIN_DIR:$PATH"
+
 # Create & start SAM2 serverless function on CPU
-PATH="$NUCLIO_BIN_DIR:$PATH" ./serverless/deploy_cpu.sh serverless/pytorch/facebookresearch/sam2
+./serverless/deploy_cpu.sh serverless/pytorch/facebookresearch/sam2
+```
+
+### For Windows PCs
+
+```powershell
+# Set variables
+$CVAT_ROOT_DIR = "C:\GitHub\cvat"  # Change this to your CVAT directory
+$NUCLIO_BIN_DIR = "C:\GitHub\bin"  # Change this to the directory where you want to store nuctl
+$USE_NUCLIO_VERSION = "1.14.0"     # Should match nuclio version used by CVAT
+
+# Create directory for nuctl if it doesn't exist
+if (-not (Test-Path -Path $NUCLIO_BIN_DIR)) {
+    New-Item -ItemType Directory -Path $NUCLIO_BIN_DIR -Force
+}
+
+# Download nuctl executable
+$nuctl_url = "https://github.com/nuclio/nuclio/releases/download/$USE_NUCLIO_VERSION/nuctl-$USE_NUCLIO_VERSION-windows-amd64"
+$nuctl_path = Join-Path -Path $NUCLIO_BIN_DIR -ChildPath "nuctl"
+
+Write-Host "Downloading nuctl from $nuctl_url..."
+Invoke-WebRequest -Uri $nuctl_url -OutFile $nuctl_path
+
+# Navigate to CVAT root directory (assumes you are already on the correct branch, such as v2.32.0-sam2)
+Set-Location -Path $CVAT_ROOT_DIR
+
+# Add nuctl to PATH temporarily for this session
+$env:PATH = "$NUCLIO_BIN_DIR;$env:PATH"
+
+# Create & start SAM2 serverless function on CPU
+.\serverless\deploy_cpu.ps1 "$CVAT_ROOT_DIR\serverless\pytorch\facebookresearch\sam2"
 ```
 
 This setup assumes that CVAT and the SAM2 serverless function are running on the same machine. Ensure that the `.env` file is configured correctly with `CVAT_NUCLIO_HOST=localhost`.
@@ -164,10 +388,12 @@ This setup assumes that CVAT and the SAM2 serverless function are running on the
 Remember to stop and restart CVAT:
 
 ```bash
-# Stop and remove existing containers
+cd "$CVAT_ROOT_DIR"
+
+# Stop and remove existing containers (should use compose.yaml by default, add -f compose.yaml if not)
 docker compose down
 
-# Rebuild and restart containers
+# Rebuild and restart containers (should use compose.yaml by default, add -f compose.yaml if not)
 docker compose up -d --build --force-recreate --renew-anon-volumes
 ```
 
@@ -175,14 +401,19 @@ docker compose up -d --build --force-recreate --renew-anon-volumes
 
 Run on separate server from CVAT server:
 
+### For Linux PCs
+
 ```bash
 # Set variables
-CVAT_ROOT_DIR=/home/kristian/GitHub/cvat
-NUCLIO_BIN_DIR=/home/kristian/GitHub/bin
+CVAT_ROOT_DIR=/home/kristian/GitHub/cvat # Change this to your CVAT directory
+NUCLIO_BIN_DIR=/home/kristian/GitHub/bin # Change this to the directory where you want to store nuctl
 USE_NUCLIO_VERSION=1.14.0 # Should match nuclio version used by CVAT
 USE_NUCLIO_ADDRESS=172.17.155.175 # set to actual IP of GPU server
 
-# Get nuctl executable
+# Create directory for nuctl if it doesn't exist
+mkdir -p "$NUCLIO_BIN_DIR"
+
+# Download nuctl executable
 mkdir "$NUCLIO_BIN_DIR"
 cd "$NUCLIO_BIN_DIR"
 wget "https://github.com/nuclio/nuclio/releases/download/$USE_NUCLIO_VERSION/nuctl-$USE_NUCLIO_VERSION-linux-amd64"
@@ -193,7 +424,10 @@ git clone https://github.com/dk-teknologisk-jahs/cvat.git "$CVAT_ROOT_DIR"
 cd "$CVAT_ROOT_DIR"
 git switch v2.32.0-sam2
 
-# Create & start SAM2 serverless function on GPU and dashboard server
+# Add nuctl to PATH temporarily for this session
+export PATH="$NUCLIO_BIN_DIR:$PATH"
+
+# Create & start SAM2 serverless function on GPU and dashboard server to access it
 docker network create cvat_cvat
 PATH="$NUCLIO_BIN_DIR:$PATH" ./serverless/deploy_gpu.sh serverless/pytorch/facebookresearch/sam2
 docker run -p 8070:8070 \
@@ -201,6 +435,39 @@ docker run -p 8070:8070 \
   -e NUCLIO_DASHBOARD_EXTERNAL_IP_ADDRESSES=$USE_NUCLIO_ADDRESS \
   --network cvat_cvat \
   quay.io/nuclio/dashboard:$USE_NUCLIO_VERSION-amd64
+```
+
+### For Windows PCs
+
+```powershell
+# Set variables
+$CVAT_ROOT_DIR = "C:\GitHub\cvat"  # Change this to your CVAT directory
+$NUCLIO_BIN_DIR = "C:\GitHub\bin"  # Change this to the directory where you want to store nuctl
+$USE_NUCLIO_VERSION = "1.14.0"     # Should match nuclio version used by CVAT
+
+# Create directory for nuctl if it doesn't exist
+if (-not (Test-Path -Path $NUCLIO_BIN_DIR)) {
+    New-Item -ItemType Directory -Path $NUCLIO_BIN_DIR -Force
+}
+
+# Download nuctl executable
+$nuctl_url = "https://github.com/nuclio/nuclio/releases/download/$USE_NUCLIO_VERSION/nuctl-$USE_NUCLIO_VERSION-windows-amd64"
+$nuctl_path = Join-Path -Path $NUCLIO_BIN_DIR -ChildPath "nuctl"
+
+Write-Host "Downloading nuctl from $nuctl_url..."
+Invoke-WebRequest -Uri $nuctl_url -OutFile $nuctl_path
+
+# Get our CVAT fork and switch to branch with SAM2
+git clone https://github.com/dk-teknologisk-jahs/cvat.git "$CVAT_ROOT_DIR"
+cd "$CVAT_ROOT_DIR"
+git switch v2.32.0-sam2
+
+# Add nuctl to PATH temporarily for this session
+$env:PATH = "$NUCLIO_BIN_DIR;$env:PATH"
+
+# Create & start SAM2 serverless function on GPU and dashboard server to access it
+Write-Host "Deploying SAM2 serverless function..."
+.\deploy_gpu.ps1 "$CVAT_ROOT_DIR\serverless\pytorch\facebookresearch\sam2"
 ```
 
 # Original README from here on
