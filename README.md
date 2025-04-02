@@ -166,6 +166,10 @@ EOF
 git add -f serverless/deploy_cpu.ps1 serverless/deploy_gpu.ps1
 git commit -m 'Added deploy_cpu.ps1 and deploy_gpu.ps1 for Windows'
 
+# Compatibility fix for yolov7
+sed -i 's/baseImage: nvidia\/cuda:12\.6\.3-cudnn-runtime-ubuntu22\.04/baseImage: nvidia\/cuda:12\.4\.1-cudnn-runtime-ubuntu22\.04/g' serverless/onnx/WongKinYiu/yolov7/nuclio/function-gpu.yaml
+git commit -m 'Downgrade cuda of yolov7 from 2.6.3 to 2.4.1 for better compatibility'
+
 # Resolve any conflicts if necessary
 # Then commit and push
 git push -u origin v2.32.0-sam2
@@ -325,6 +329,10 @@ nuctl get function --platform local
 EOF
 git add -f serverless/deploy_cpu.ps1 serverless/deploy_gpu.ps1
 git commit -m 'Added deploy_cpu.ps1 and deploy_gpu.ps1 for Windows'
+
+# Compatibility fix for yolov7
+sed -i 's/baseImage: nvidia\/cuda:12\.6\.3-cudnn-runtime-ubuntu22\.04/baseImage: nvidia\/cuda:12\.4\.1-cudnn-runtime-ubuntu22\.04/g' serverless/onnx/WongKinYiu/yolov7/nuclio/function-gpu.yaml
+git commit -m 'Downgrade cuda of yolov7 from 2.6.3 to 2.4.1 for better compatibility'
 
 # Pop the stashed changes if necessary
  apply stash^{/local_changes}
