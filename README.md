@@ -524,6 +524,8 @@ docker run -d \
   quay.io/nuclio/dashboard:$USE_NUCLIO_VERSION-amd64
 ```
 
+This setup assumes that CVAT and the SAM2 serverless function are running on separate machines. Ensure that the `.env` file is configured correctly with `CVAT_NUCLIO_HOST` pointing to the IP address of the machine running the serverless functions. Be aware that you can't use both local nuclio and remote nuclio at the same time.
+
 # Original README from here on
 
 <p align="center">
