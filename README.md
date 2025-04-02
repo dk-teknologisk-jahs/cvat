@@ -9,6 +9,9 @@ The following CVAT versions are available - see below for instructions on how to
 
 ## Running this fork of CVAT
 
+Requirements:
+- Docker & Docker Compose
+
 ```bash
 # Clone our fork
 git clone https://github.com/dk-teknologisk-jahs/cvat.git
@@ -17,7 +20,7 @@ cd cvat
 # Switch to branch with changes
 git switch v2.32.0-sam2
 
-# Check .env and change variables as necessary
+# Check .env and change any variables as necessary, such as CVAT_NUCLIO_HOST
 
 # Build & Start CVAT using the provided compose files (should use compose.yaml by default, add -f compose.yaml if not)
 docker compose up -d --build --force-recreate --renew-anon-volumes
@@ -163,7 +166,7 @@ git commit -m 'Added deploy_cpu.ps1 and deploy_gpu.ps1 for Windows'
 git push -u origin v2.32.0-sam2
 ```
 
-## Git commands to update CVAT version
+## Updating to a new CVAT version
 
 When CVAT releases a new version (e.g. v2.45.0), you can either just merge the changes since the last stable version:
 
@@ -324,9 +327,13 @@ This approach gives a clean upgrade path while maintaining the customizations.
 
 ## Example of running SAM2 on CPU as serverless function on the same PC as CVAT:
 
-Run on the same PC to set up the SAM2 serverless plugin:
+Run on the same PC to set up the SAM2 serverless plugin for CVAT, running on the CPU (change to deploy_gpu script to run on GPU).
 
-### For Linux PCs
+### For Linux PCs (Bash)
+
+Requirements:
+- Docker & Docker Compose
+- NVIDIA Container Toolkit (if using deploy_gpu)
 
 ```bash
 # Set variables
@@ -353,7 +360,12 @@ export PATH="$NUCLIO_BIN_DIR:$PATH"
 ./serverless/deploy_cpu.sh serverless/pytorch/facebookresearch/sam2
 ```
 
-### For Windows PCs
+### For Windows PCs (PowerShell)
+
+Requirements:
+- Docker & Docker Compose
+  - Make sure to use the WSL2 backend for Docker Desktop
+- NVIDIA Container Toolkit (if using deploy_gpu)
 
 ```powershell
 # Set variables
@@ -401,14 +413,18 @@ docker compose up -d --build --force-recreate --renew-anon-volumes
 
 Run on separate server from CVAT server:
 
-### For Linux PCs
+### For Linux PCs (Bash)
+
+Requirements:
+- Docker & Docker Compose
+- NVIDIA Container Toolkit (if using deploy_gpu)
 
 ```bash
 # Set variables
 CVAT_ROOT_DIR=/home/kristian/GitHub/cvat # Change this to your CVAT directory
 NUCLIO_BIN_DIR=/home/kristian/GitHub/bin # Change this to the directory where you want to store nuctl
 USE_NUCLIO_VERSION=1.14.0 # Should match nuclio version used by CVAT
-USE_NUCLIO_ADDRESS=172.17.155.175 # set to actual IP of GPU server
+USE_NUCLIO_ADDRESS=172.17.155.175 # set to actual IP of GPU server (hostname might work, didn't in my case though)
 
 # Create directory for nuctl if it doesn't exist
 mkdir -p "$NUCLIO_BIN_DIR"
@@ -419,7 +435,7 @@ cd "$NUCLIO_BIN_DIR"
 wget "https://github.com/nuclio/nuclio/releases/download/$USE_NUCLIO_VERSION/nuctl-$USE_NUCLIO_VERSION-linux-amd64"
 ln -sf "nuctl-$USE_NUCLIO_VERSION-linux-amd64" nuctl
 
-# Get our CVAT fork and switch to branch with SAM2
+# Clone our CVAT fork and switch to branch with SAM2
 git clone https://github.com/dk-teknologisk-jahs/cvat.git "$CVAT_ROOT_DIR"
 cd "$CVAT_ROOT_DIR"
 git switch v2.32.0-sam2
@@ -427,23 +443,39 @@ git switch v2.32.0-sam2
 # Add nuctl to PATH temporarily for this session
 export PATH="$NUCLIO_BIN_DIR:$PATH"
 
-# Create & start SAM2 serverless function on GPU and dashboard server to access it
+# The deploy_cpu/gpu scripts expect the cvat_cvat docker network to exist, so we need to create it
 docker network create cvat_cvat
+
+# Create & start SAM2 (or any other, checkout the builtin models) serverless function on GPU
 PATH="$NUCLIO_BIN_DIR:$PATH" ./serverless/deploy_gpu.sh serverless/pytorch/facebookresearch/sam2
-docker run -p 8070:8070 \
+
+# Start nuclio dashboard server to monitor and provide access to the function over HTTP API
+# It might be possible to get it working without this (directly access node port), but I couldn't make it work
+docker run -d \
+  -p 8070:8070 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -e NUCLIO_DASHBOARD_EXTERNAL_IP_ADDRESSES=$USE_NUCLIO_ADDRESS \
   --network cvat_cvat \
+  --name nuclio-dashboard \
+  -e NUCLIO_DASHBOARD_EXTERNAL_IP_ADDRESSES=$USE_NUCLIO_ADDRESS \
   quay.io/nuclio/dashboard:$USE_NUCLIO_VERSION-amd64
 ```
 
-### For Windows PCs
+### For Windows PCs (PowerShell)
+
+Requirements:
+- Docker & Docker Compose
+  - Make sure to use the WSL2 backend for Docker Desktop
+  - If you have issues with binding to the docker daemon socket, try some of the solutions [here](https://stackoverflow.com/questions/36765138/bind-to-docker-socket-on-windows) and please create an issue with any improvement suggestions
+- Ensure you have installed the NVIDIA Container Toolkit for Windows and configured Docker to use your GPU
+- You might need to set the execution policy to run scripts: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
+- Make sure ports are open in Windows Firewall for the nuclio dashboard (8070)
 
 ```powershell
 # Set variables
 $CVAT_ROOT_DIR = "C:\GitHub\cvat"  # Change this to your CVAT directory
 $NUCLIO_BIN_DIR = "C:\GitHub\bin"  # Change this to the directory where you want to store nuctl
 $USE_NUCLIO_VERSION = "1.14.0"     # Should match nuclio version used by CVAT
+$USE_NUCLIO_ADDRESS = "172.17.155.175" # set to actual IP of GPU server (hostname might work, didn't in my case though)
 
 # Create directory for nuctl if it doesn't exist
 if (-not (Test-Path -Path $NUCLIO_BIN_DIR)) {
@@ -457,7 +489,7 @@ $nuctl_path = Join-Path -Path $NUCLIO_BIN_DIR -ChildPath "nuctl"
 Write-Host "Downloading nuctl from $nuctl_url..."
 Invoke-WebRequest -Uri $nuctl_url -OutFile $nuctl_path
 
-# Get our CVAT fork and switch to branch with SAM2
+# Clone our CVAT fork and switch to branch with SAM2
 git clone https://github.com/dk-teknologisk-jahs/cvat.git "$CVAT_ROOT_DIR"
 cd "$CVAT_ROOT_DIR"
 git switch v2.32.0-sam2
@@ -465,9 +497,21 @@ git switch v2.32.0-sam2
 # Add nuctl to PATH temporarily for this session
 $env:PATH = "$NUCLIO_BIN_DIR;$env:PATH"
 
-# Create & start SAM2 serverless function on GPU and dashboard server to access it
-Write-Host "Deploying SAM2 serverless function..."
+# The deploy_cpu/gpu scripts expect the cvat_cvat docker network to exist, so we need to create it
+docker network create cvat_cvat
+
+# Create & start SAM2 (or any other, checkout the builtin models) serverless function on GPU
 .\deploy_gpu.ps1 "$CVAT_ROOT_DIR\serverless\pytorch\facebookresearch\sam2"
+
+# Start nuclio dashboard server to monitor and provide access to the function over HTTP API
+# It might be possible to get it working without this (directly access node port), but I couldn't make it work
+docker run -d \
+  -p 8070:8070 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  --network cvat_cvat \
+  --name nuclio-dashboard \
+  -e NUCLIO_DASHBOARD_EXTERNAL_IP_ADDRESSES=$USE_NUCLIO_ADDRESS \
+  quay.io/nuclio/dashboard:$USE_NUCLIO_VERSION-amd64
 ```
 
 # Original README from here on
