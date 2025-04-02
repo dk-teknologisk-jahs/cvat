@@ -26,7 +26,7 @@ git switch v2.32.0-sam2
 docker compose up -d --build --force-recreate --renew-anon-volumes
 ```
 
-## Commands used to create this fork
+## Commands used to create this fork (Bash)
 
 ```bash
 # Clone our fork
@@ -84,7 +84,7 @@ git commit -m 'Added compose.yml, compose.override.yaml and .env'
 
 # Add deploy_cpu.ps1 and deploy_gpu.ps1 for Windows deployment of models
 cat <<'EOF' >serverless/deploy_cpu.ps1
-# deploy_cpu.ps1
+# deploy_cpu.ps1 - Windows version of deploy_cpu.sh
 # Sample commands to deploy nuclio functions on CPU
 
 # Enable stopping on errors
@@ -107,10 +107,10 @@ nuctl create project cvat --platform local
 Get-ChildItem -Path $FUNCTIONS_DIR -Recurse -Filter "function.yaml" | ForEach-Object {
     $func_config = $_.FullName
     $func_root = Split-Path -Parent $func_config
-
-    # Calculate relative path for display purposes
     $func_parent_dir = Split-Path -Parent $func_root
-    $func_rel_path = (Resolve-Path -Relative $func_parent_dir -ErrorAction SilentlyContinue).TrimStart(".\")
+
+    # Calculate relative path similar to Linux's realpath
+    $func_rel_path = $func_parent_dir.Replace($SCRIPT_DIR, "").TrimStart("\")
 
     # Build Docker image if Dockerfile exists
     if (Test-Path -Path "$func_root\Dockerfile") {
@@ -131,6 +131,10 @@ nuctl get function --platform local
 EOF
 cat <<'EOF' >serverless/deploy_gpu.ps1
 # deploy_gpu.ps1 - Windows version of deploy_gpu.sh
+# Sample commands to deploy nuclio functions on GPU
+
+# Enable stopping on errors
+$ErrorActionPreference = "Stop"
 
 # Get the script directory
 $SCRIPT_DIR = $PSScriptRoot
@@ -143,9 +147,10 @@ nuctl create project cvat --platform local
 Get-ChildItem -Path $FUNCTIONS_DIR -Recurse -Filter "function-gpu.yaml" | ForEach-Object {
     $func_config = $_.FullName
     $func_root = Split-Path -Parent $func_config
+    $func_parent_dir = Split-Path -Parent $func_root
 
-    # Calculate relative path for display purposes
-    $func_rel_path = (Resolve-Path -Relative (Split-Path -Parent $func_root)).TrimStart(".\")
+    # Calculate relative path similar to Linux's realpath
+    $func_rel_path = $func_parent_dir.Replace($SCRIPT_DIR, "").TrimStart("\")
 
     Write-Host "Deploying $func_rel_path function..."
     nuctl deploy --project-name cvat --path $func_root `
@@ -239,7 +244,7 @@ git commit -m 'Added compose.yml, compose.override.yaml and .env'
 
 # Add deploy_cpu.ps1 and deploy_gpu.ps1 for Windows deployment of models
 cat <<'EOF' >serverless/deploy_cpu.ps1
-# deploy_cpu.ps1
+# deploy_cpu.ps1 - Windows version of deploy_cpu.sh
 # Sample commands to deploy nuclio functions on CPU
 
 # Enable stopping on errors
@@ -262,10 +267,10 @@ nuctl create project cvat --platform local
 Get-ChildItem -Path $FUNCTIONS_DIR -Recurse -Filter "function.yaml" | ForEach-Object {
     $func_config = $_.FullName
     $func_root = Split-Path -Parent $func_config
-
-    # Calculate relative path for display purposes
     $func_parent_dir = Split-Path -Parent $func_root
-    $func_rel_path = (Resolve-Path -Relative $func_parent_dir -ErrorAction SilentlyContinue).TrimStart(".\")
+
+    # Calculate relative path similar to Linux's realpath
+    $func_rel_path = $func_parent_dir.Replace($SCRIPT_DIR, "").TrimStart("\")
 
     # Build Docker image if Dockerfile exists
     if (Test-Path -Path "$func_root\Dockerfile") {
@@ -286,6 +291,10 @@ nuctl get function --platform local
 EOF
 cat <<'EOF' >serverless/deploy_gpu.ps1
 # deploy_gpu.ps1 - Windows version of deploy_gpu.sh
+# Sample commands to deploy nuclio functions on GPU
+
+# Enable stopping on errors
+$ErrorActionPreference = "Stop"
 
 # Get the script directory
 $SCRIPT_DIR = $PSScriptRoot
@@ -298,9 +307,10 @@ nuctl create project cvat --platform local
 Get-ChildItem -Path $FUNCTIONS_DIR -Recurse -Filter "function-gpu.yaml" | ForEach-Object {
     $func_config = $_.FullName
     $func_root = Split-Path -Parent $func_config
+    $func_parent_dir = Split-Path -Parent $func_root
 
-    # Calculate relative path for display purposes
-    $func_rel_path = (Resolve-Path -Relative (Split-Path -Parent $func_root)).TrimStart(".\")
+    # Calculate relative path similar to Linux's realpath
+    $func_rel_path = $func_parent_dir.Replace($SCRIPT_DIR, "").TrimStart("\")
 
     Write-Host "Deploying $func_rel_path function..."
     nuctl deploy --project-name cvat --path $func_root `
