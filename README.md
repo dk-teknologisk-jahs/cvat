@@ -174,7 +174,7 @@ When CVAT releases a new version (e.g. v2.45.0), you can either just merge the c
 # If you have made changes to the .env etc, make sure you are on the previous stable
 # version w. SAM2 (v2.32.0-sam2 in this case), so you can stash the local changes
 git checkout v2.32.0-sam2 # replace with the branch you are using now
-git stash push -m "Local changes"
+git stash push -m "local_changes"
 
 # Create a new branch from the previous stable version w. SAM2 (v2.32.0-sam2 in this case)
 git fetch upstream --tags
@@ -184,7 +184,7 @@ git checkout -b v2.45.0-sam2 v2.32.0-sam2 # replace with the new CVAT version yo
 git merge upstream/v2.45.0 # replace with the new CVAT version you want to use
 
 # Pop the stashed changes if necessary
-git stash apply stash^{/Local changes}
+git stash apply stash^{/local_changes}
 
 # Resolve conflicts, test, then optionally push
 git push -u origin v2.45.0-sam2 # replace with the new CVAT version you want to use
@@ -196,7 +196,7 @@ Or alternatively, start from scratch, reapply the SAM2 changes and add all neces
 # If you have made changes to the .env etc, make sure you are on the previous stable
 # version w. SAM2 (v2.32.0-sam2 in this case), so you can stash the local changes
 git checkout v2.32.0-sam2 # replace with the branch you are using now
-git stash push -m "Local changes"
+git stash push -m "local_changes"
 
 # Create a new branch from the new stable version wo. SAM2 (v2.45.0 in this case)
 git fetch upstream --tags
@@ -317,7 +317,7 @@ git add -f serverless/deploy_cpu.ps1 serverless/deploy_gpu.ps1
 git commit -m 'Added deploy_cpu.ps1 and deploy_gpu.ps1 for Windows'
 
 # Pop the stashed changes if necessary
-git stash apply stash^{/Local changes}
+git stash apply stash^{/local_changes}
 
 # Resolve conflicts, test, then optionally push
 git push -u origin v2.45.0-sam2 # replace with the new CVAT version you want to use
