@@ -366,7 +366,9 @@ mkdir -p "$NUCLIO_BIN_DIR"
 mkdir -p "$NUCLIO_BIN_DIR"
 cd "$NUCLIO_BIN_DIR"
 wget "https://github.com/nuclio/nuclio/releases/download/$USE_NUCLIO_VERSION/nuctl-$USE_NUCLIO_VERSION-linux-amd64"
+chmod +x "nuctl-$USE_NUCLIO_VERSION-linux-amd64"
 ln -sf "nuctl-$USE_NUCLIO_VERSION-linux-amd64" nuctl
+chmod +x nuctl
 
 # Navigate to CVAT root directory (assumes you are already on the correct branch, such as v2.32.0-sam2)
 cd "$CVAT_ROOT_DIR"
@@ -402,6 +404,7 @@ $nuctl_path = Join-Path -Path $NUCLIO_BIN_DIR -ChildPath "nuctl"
 
 Write-Host "Downloading nuctl from $nuctl_url..."
 Invoke-WebRequest -Uri $nuctl_url -OutFile $nuctl_path
+icacls "$nuctl_path" /grant:r "$env:USERNAME:(RX)"
 
 # Navigate to CVAT root directory (assumes you are already on the correct branch, such as v2.32.0-sam2)
 Set-Location -Path $CVAT_ROOT_DIR
@@ -451,7 +454,9 @@ mkdir -p "$NUCLIO_BIN_DIR"
 mkdir "$NUCLIO_BIN_DIR"
 cd "$NUCLIO_BIN_DIR"
 wget "https://github.com/nuclio/nuclio/releases/download/$USE_NUCLIO_VERSION/nuctl-$USE_NUCLIO_VERSION-linux-amd64"
+chmod +x "nuctl-$USE_NUCLIO_VERSION-linux-amd64"
 ln -sf "nuctl-$USE_NUCLIO_VERSION-linux-amd64" nuctl
+chmod +x nuctl
 
 # Clone our CVAT fork and switch to branch with SAM2
 git clone https://github.com/dk-teknologisk-jahs/cvat.git "$CVAT_ROOT_DIR"
@@ -506,6 +511,7 @@ $nuctl_path = Join-Path -Path $NUCLIO_BIN_DIR -ChildPath "nuctl"
 
 Write-Host "Downloading nuctl from $nuctl_url..."
 Invoke-WebRequest -Uri $nuctl_url -OutFile $nuctl_path
+icacls "$nuctl_path" /grant:r "$env:USERNAME:(RX)"
 
 # Clone our CVAT fork and switch to branch with SAM2
 git clone https://github.com/dk-teknologisk-jahs/cvat.git "$CVAT_ROOT_DIR"
