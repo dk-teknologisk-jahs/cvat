@@ -522,7 +522,7 @@ icacls "$nuctl_path" /grant:r "$env:USERNAME:(RX)"
 # Clone our CVAT fork, navigate to CVAT root directory, switch to correct branch and pull latest changes
 git clone https://github.com/dk-teknologisk-jahs/cvat.git "$CVAT_ROOT_DIR"
 cd "$CVAT_ROOT_DIR"
-git switch v2.32.0-sam2
+git switch v2.32.0-sam2 # replace with the branch you are using now
 git pull
 
 # Add nuctl to PATH temporarily for this session
