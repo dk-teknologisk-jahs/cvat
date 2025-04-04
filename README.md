@@ -1,8 +1,9 @@
 # Changes from upstream at cvat-ai/cvat
 
+- Added support for running SAM2 (Credit to [hashJoe/cvat:feature/sam2](https://github.com/cvat-ai/cvat/pull/8610))
 - Added convenience compose files and envvars to more easily run annotation models (nuclio serverless functions) either locally or on a separate server
 - Added deploy_cpu.ps1 and deploy_gpu.ps1 for easier Windows deployment of models
-- Added support for running SAM2 (Credit to [hashJoe/cvat:feature/sam2](https://github.com/cvat-ai/cvat/pull/8610))
+- Fixed some nuclio issues in faster-rcnn function
 
 The following CVAT versions are available - see below for instructions on how to update to newer versions:
 - [v2.32.0-sam2](https://github.com/dk-teknologisk-jahs/cvat/tree/v2.32.0-sam2)
@@ -357,7 +358,7 @@ Requirements:
 # Set variables
 CVAT_ROOT_DIR=/home/jahs/GitHub/cvat # Change this to your CVAT directory
 NUCLIO_BIN_DIR=/home/jahs/GitHub/bin # Change this to the directory where you want to store nuctl
-USE_NUCLIO_VERSION=1.14.0 # Should match nuclio version used by CVAT
+USE_NUCLIO_VERSION=1.13.22 # Should match nuclio version used by CVAT
 
 # Create directory for nuctl if it doesn't exist
 mkdir -p "$NUCLIO_BIN_DIR"
@@ -370,8 +371,10 @@ chmod +x "nuctl-$USE_NUCLIO_VERSION-linux-amd64"
 ln -sf "nuctl-$USE_NUCLIO_VERSION-linux-amd64" nuctl
 chmod +x nuctl
 
-# Navigate to CVAT root directory (assumes you are already on the correct branch, such as v2.32.0-sam2)
+# Navigate to CVAT root directory, switch to correct branch and pull latest changes
 cd "$CVAT_ROOT_DIR"
+git switch v2.32.0-sam2 # replace with the branch you are using now
+git pull
 
 # Add nuctl to PATH temporarily for this session
 export PATH="$NUCLIO_BIN_DIR:$PATH"
@@ -391,7 +394,7 @@ Requirements:
 # Set variables
 $CVAT_ROOT_DIR = "C:\GitHub\cvat"  # Change this to your CVAT directory
 $NUCLIO_BIN_DIR = "C:\GitHub\bin"  # Change this to the directory where you want to store nuctl
-$USE_NUCLIO_VERSION = "1.14.0"     # Should match nuclio version used by CVAT
+$USE_NUCLIO_VERSION = "1.13.22"     # Should match nuclio version used by CVAT
 
 # Create directory for nuctl if it doesn't exist
 if (-not (Test-Path -Path $NUCLIO_BIN_DIR)) {
@@ -406,8 +409,10 @@ Write-Host "Downloading nuctl from $nuctl_url..."
 Invoke-WebRequest -Uri $nuctl_url -OutFile $nuctl_path
 icacls "$nuctl_path" /grant:r "$env:USERNAME:(RX)"
 
-# Navigate to CVAT root directory (assumes you are already on the correct branch, such as v2.32.0-sam2)
+# Navigate to CVAT root directory, switch to correct branch and pull latest changes
 Set-Location -Path $CVAT_ROOT_DIR
+git switch v2.32.0-sam2 # replace with the branch you are using now
+git pull
 
 # Add nuctl to PATH temporarily for this session
 $env:PATH = "$NUCLIO_BIN_DIR;$env:PATH"
@@ -444,7 +449,7 @@ Requirements:
 # Set variables
 CVAT_ROOT_DIR=/home/kristian/GitHub/cvat # Change this to your CVAT directory
 NUCLIO_BIN_DIR=/home/kristian/GitHub/bin # Change this to the directory where you want to store nuctl
-USE_NUCLIO_VERSION=1.14.0 # Should match nuclio version used by CVAT
+USE_NUCLIO_VERSION=1.13.22 # Should match nuclio version used by CVAT
 USE_NUCLIO_ADDRESS=172.17.155.175 # set to actual IP of GPU server (hostname might work, didn't in my case though)
 
 # Create directory for nuctl if it doesn't exist
@@ -458,10 +463,11 @@ chmod +x "nuctl-$USE_NUCLIO_VERSION-linux-amd64"
 ln -sf "nuctl-$USE_NUCLIO_VERSION-linux-amd64" nuctl
 chmod +x nuctl
 
-# Clone our CVAT fork and switch to branch with SAM2
+# Clone our CVAT fork, navigate to CVAT root directory, switch to correct branch and pull latest changes
 git clone https://github.com/dk-teknologisk-jahs/cvat.git "$CVAT_ROOT_DIR"
 cd "$CVAT_ROOT_DIR"
-git switch v2.32.0-sam2
+git switch v2.32.0-sam2 # replace with the branch you are using now
+git pull
 
 # Add nuctl to PATH temporarily for this session
 export PATH="$NUCLIO_BIN_DIR:$PATH"
@@ -497,7 +503,7 @@ Requirements:
 # Set variables
 $CVAT_ROOT_DIR = "C:\GitHub\cvat"  # Change this to your CVAT directory
 $NUCLIO_BIN_DIR = "C:\GitHub\bin"  # Change this to the directory where you want to store nuctl
-$USE_NUCLIO_VERSION = "1.14.0"     # Should match nuclio version used by CVAT
+$USE_NUCLIO_VERSION = "1.13.22"     # Should match nuclio version used by CVAT
 $USE_NUCLIO_ADDRESS = "172.17.155.175" # set to actual IP of GPU server (hostname might work, didn't in my case though)
 
 # Create directory for nuctl if it doesn't exist
@@ -513,10 +519,11 @@ Write-Host "Downloading nuctl from $nuctl_url..."
 Invoke-WebRequest -Uri $nuctl_url -OutFile $nuctl_path
 icacls "$nuctl_path" /grant:r "$env:USERNAME:(RX)"
 
-# Clone our CVAT fork and switch to branch with SAM2
+# Clone our CVAT fork, navigate to CVAT root directory, switch to correct branch and pull latest changes
 git clone https://github.com/dk-teknologisk-jahs/cvat.git "$CVAT_ROOT_DIR"
 cd "$CVAT_ROOT_DIR"
 git switch v2.32.0-sam2
+git pull
 
 # Add nuctl to PATH temporarily for this session
 $env:PATH = "$NUCLIO_BIN_DIR;$env:PATH"
