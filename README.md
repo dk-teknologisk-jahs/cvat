@@ -367,7 +367,7 @@ Requirements:
 # Set variables
 CVAT_ROOT_DIR=/home/jahs/GitHub/cvat # Change this to your CVAT directory
 NUCLIO_BIN_DIR=/home/jahs/GitHub/bin # Change this to the directory where you want to store nuctl
-USE_NUCLIO_VERSION=1.13.22 # Should match nuclio version used by CVAT
+USE_NUCLIO_VERSION=1.14.0 # Should match nuclio version used by CVAT (1.13.22 and 1.14.1 both failed for CVAT v2.32.0, so sticking with 1.14.0 for now)
 
 # Create directory for nuctl if it doesn't exist
 mkdir -p "$NUCLIO_BIN_DIR"
@@ -403,7 +403,7 @@ Requirements:
 # Set variables
 $CVAT_ROOT_DIR = "C:\GitHub\cvat"  # Change this to your CVAT directory
 $NUCLIO_BIN_DIR = "C:\GitHub\bin"  # Change this to the directory where you want to store nuctl
-$USE_NUCLIO_VERSION = "1.13.22"     # Should match nuclio version used by CVAT
+$USE_NUCLIO_VERSION = "1.14.0"     # Should match nuclio version used by CVAT (1.13.22 and 1.14.1 both failed for CVAT v2.32.0, so sticking with 1.14.0 for now)
 
 # Create directory for nuctl if it doesn't exist
 if (-not (Test-Path -Path $NUCLIO_BIN_DIR)) {
@@ -458,7 +458,7 @@ Requirements:
 # Set variables
 CVAT_ROOT_DIR=/home/kristian/GitHub/cvat # Change this to your CVAT directory
 NUCLIO_BIN_DIR=/home/kristian/GitHub/bin # Change this to the directory where you want to store nuctl
-USE_NUCLIO_VERSION=1.13.22 # Should match nuclio version used by CVAT
+USE_NUCLIO_VERSION=1.14.0 # Should match nuclio version used by CVAT (1.13.22 and 1.14.1 both failed for CVAT v2.32.0, so sticking with 1.14.0 for now)
 USE_NUCLIO_ADDRESS=172.17.155.175 # set to actual IP of GPU server (hostname might work, didn't in my case though)
 
 # Create directory for nuctl if it doesn't exist
@@ -512,7 +512,7 @@ Requirements:
 # Set variables
 $CVAT_ROOT_DIR = "C:\GitHub\cvat"  # Change this to your CVAT directory
 $NUCLIO_BIN_DIR = "C:\GitHub\bin"  # Change this to the directory where you want to store nuctl
-$USE_NUCLIO_VERSION = "1.13.22"     # Should match nuclio version used by CVAT
+$USE_NUCLIO_VERSION = "1.14.0"     # Should match nuclio version used by CVAT (1.13.22 and 1.14.1 both failed for CVAT v2.32.0, so sticking with 1.14.0 for now)
 $USE_NUCLIO_ADDRESS = "172.17.155.175" # set to actual IP of GPU server (hostname might work, didn't in my case though)
 
 # Create directory for nuctl if it doesn't exist
