@@ -1,9 +1,10 @@
 # Changes from upstream at cvat-ai/cvat
 
-- Added support for running SAM2 (Credit to [hashJoe/cvat:feature/sam2](https://github.com/cvat-ai/cvat/pull/8610))
 - Added convenience compose files and envvars to more easily run annotation models (nuclio serverless functions) either locally or on a separate server
 - Added deploy_cpu.ps1 and deploy_gpu.ps1 for easier Windows deployment of models
-- Fixed some nuclio issues in faster-rcnn function
+- Added support for running SAM2 (Credit to [hashJoe/cvat:feature/sam2](https://github.com/cvat-ai/cvat/pull/8610))
+- Fixed CUDA version issues in yolov7
+- Fixed dependency issues in faster-rcnn
 
 The following CVAT versions are available - see below for instructions on how to update to newer versions:
 - [v2.32.0-sam2](https://github.com/dk-teknologisk-jahs/cvat/tree/v2.32.0-sam2)
@@ -171,6 +172,10 @@ git commit -m 'Added deploy_cpu.ps1 and deploy_gpu.ps1 for Windows'
 sed -i 's/baseImage: nvidia\/cuda:12\.6\.3-cudnn-runtime-ubuntu22\.04/baseImage: nvidia\/cuda:12\.4\.1-cudnn-runtime-ubuntu22\.04/g' serverless/onnx/WongKinYiu/yolov7/nuclio/function-gpu.yaml
 git commit -m 'Downgrade cuda of yolov7 from 2.6.3 to 2.4.1 for better compatibility'
 
+# Fix dependency issues with faster-rcnn
+sed -i '/^  build:/a\    commands:\n      - pip install msgpack # Added to fix bug - https://github.com/nuclio/nuclio/issues/3472' /home/jahs/GitHub/cvat/serverless/tensorflow/faster_rcnn_inception_v2_coco/nuclio/function*.yaml
+git commit -m 'Fix dependency issues with faster-rcnn'
+
 # Resolve any conflicts if necessary
 # Then commit and push
 git push -u origin v2.32.0-sam2
@@ -334,6 +339,10 @@ git commit -m 'Added deploy_cpu.ps1 and deploy_gpu.ps1 for Windows'
 # Compatibility fix for yolov7
 sed -i 's/baseImage: nvidia\/cuda:12\.6\.3-cudnn-runtime-ubuntu22\.04/baseImage: nvidia\/cuda:12\.4\.1-cudnn-runtime-ubuntu22\.04/g' serverless/onnx/WongKinYiu/yolov7/nuclio/function-gpu.yaml
 git commit -m 'Downgrade cuda of yolov7 from 2.6.3 to 2.4.1 for better compatibility'
+
+# Fix dependency issues with faster-rcnn
+sed -i '/^  build:/a\    commands:\n      - pip install msgpack # Added to fix bug - https://github.com/nuclio/nuclio/issues/3472' /home/jahs/GitHub/cvat/serverless/tensorflow/faster_rcnn_inception_v2_coco/nuclio/function*.yaml
+git commit -m 'Fix dependency issues with faster-rcnn'
 
 # Pop the stashed changes if necessary
  apply stash^{/local_changes}
