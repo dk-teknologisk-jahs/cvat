@@ -95,6 +95,8 @@ spec:
   eventTimeout: 30s
 
   build:
+    commands:
+      - pip install msgpack # Added to fix bug - https://github.com/nuclio/nuclio/issues/3472
     image: cvat.tf.faster_rcnn_inception_v2_coco:latest-gpu
     baseImage: tensorflow/tensorflow:2.16.1-gpu
 
