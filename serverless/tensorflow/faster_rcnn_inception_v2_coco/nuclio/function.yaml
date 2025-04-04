@@ -116,8 +116,6 @@ spec:
           value: ln -s faster_rcnn_inception_v2_coco_2018_01_28 faster_rcnn
         - kind: RUN
           value: pip install pillow pyyaml
-    commands:
-      - pip install msgpack # Added to fix bug - https://github.com/nuclio/nuclio/issues/3472
 
   triggers:
     myHttpTrigger:
