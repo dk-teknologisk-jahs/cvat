@@ -481,9 +481,6 @@ git pull
 # Add nuctl to PATH temporarily for this session
 export PATH="$NUCLIO_BIN_DIR:$PATH"
 
-# The deploy_cpu/gpu scripts expect the cvat_cvat docker network to exist, so we need to create it
-docker network create cvat_cvat
-
 # Create & start SAM2 (or any other, checkout the builtin models) serverless function on GPU
 PATH="$NUCLIO_BIN_DIR:$PATH" ./serverless/deploy_gpu.sh serverless/pytorch/facebookresearch/sam2
 
@@ -536,9 +533,6 @@ git pull
 
 # Add nuctl to PATH temporarily for this session
 $env:PATH = "$NUCLIO_BIN_DIR;$env:PATH"
-
-# The deploy_cpu/gpu scripts expect the cvat_cvat docker network to exist, so we need to create it
-docker network create cvat_cvat
 
 # Create & start SAM2 (or any other, checkout the builtin models) serverless function on GPU
 .\deploy_gpu.ps1 "$CVAT_ROOT_DIR\serverless\pytorch\facebookresearch\sam2"
