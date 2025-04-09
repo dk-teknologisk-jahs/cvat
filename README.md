@@ -26,7 +26,7 @@ git switch v2.32.0-sam2
 # Check .env and change any variables as necessary, such as CVAT_NUCLIO_HOST
 
 # Build & Start CVAT using the provided compose files (should use compose.yaml by default, add -f compose.yaml if not)
-docker compose up -d --build --force-recreate --renew-anon-volumes
+docker compose up -d --build --force-recreate
 ```
 
 ## Commands used to create this fork (Bash)
@@ -480,7 +480,7 @@ cd "$CVAT_ROOT_DIR"
 docker compose down
 
 # Rebuild and restart containers (should use compose.yaml by default, add -f compose.yaml if not)
-docker compose up -d --build --force-recreate --renew-anon-volumes
+docker compose up -d --build --force-recreate
 ```
 
 ## Example of running SAM2 on GPU as serverless function on separate PC (w. IP: 172.17.155.175):
