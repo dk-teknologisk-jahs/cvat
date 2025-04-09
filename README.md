@@ -2,7 +2,7 @@
 
 - Added convenience compose files and envvars to more easily run annotation models (nuclio serverless functions) either locally or on a separate server
 - Added deploy_cpu.ps1 and deploy_gpu.ps1 for easier Windows deployment of models
-- Added support for running SAM2 (Credit to [hashJoe/cvat:feature/sam2](https://github.com/cvat-ai/cvat/pull/8610))
+- Added support for running SAM2 (Credit to [hashJoe/cvat:feature/sam2](https://github.com/cvat-ai/cvat/pull/8610), added code to build UI container with SAM2 components)
 - Fixed CUDA version issues in yolov7
 - Fixed dependency issues in faster-rcnn
 - Turned on auto-save by default
@@ -58,12 +58,16 @@ cat <<'EOF' >compose.yaml
 include:
   - path:
     - ./docker-compose.yml
-    #- ./docker-compose.dev.yml # should not be necessary (warning: will expose stuff like the database on port 5432)
+    #- ./docker-compose.dev.yml # should not be necessary (warning: will expose DB on port 5432 unless modified in compose.override.yaml)
     - ./components/serverless/docker-compose.serverless.yml
     - ./compose.override.yaml
 EOF
 cat <<'EOF' >compose.override.yaml
 services:
+  # cvat_db: # For modifying port mapping of DB to avoid conflicts with existing PostgreSQL instances
+  #   ports: [] # Remove mappings (if using docker-compose.dev.yml)
+  #   #  - '5433:5432' # Or instead change host port 5432-->5433
+
   cvat_server:
     environment:
       CVAT_SERVERLESS: 1
@@ -74,6 +78,17 @@ services:
     environment:
       CVAT_NUCLIO_HOST: ${CVAT_NUCLIO_HOST:-localhost}
       CVAT_NUCLIO_INVOKE_METHOD: 'dashboard'
+
+  cvat_ui: # adapted from docker-compose.dev.yml, needed for custom plugins with UI components such as SAM2
+    build:
+      context: .
+      args:
+        http_proxy:
+        https_proxy:
+        no_proxy:
+        socks_proxy:
+        CLIENT_PLUGINS: ${CLIENT_PLUGINS}
+      dockerfile: Dockerfile.ui
 EOF
 cat <<'EOF' >.env
 CLIENT_PLUGINS=plugins/sam2
@@ -230,12 +245,16 @@ cat <<'EOF' >compose.yaml
 include:
   - path:
     - ./docker-compose.yml
-    #- ./docker-compose.dev.yml # should not be necessary (warning: will expose stuff like the database on port 5432)
+    #- ./docker-compose.dev.yml # should not be necessary (warning: will expose DB on port 5432 unless modified in compose.override.yaml)
     - ./components/serverless/docker-compose.serverless.yml
     - ./compose.override.yaml
 EOF
 cat <<'EOF' >compose.override.yaml
 services:
+  # cvat_db: # For modifying port mapping of DB to avoid conflicts with existing PostgreSQL instances
+  #   ports: [] # Remove mappings (if using docker-compose.dev.yml)
+  #   #  - '5433:5432' # Or instead change host port 5432-->5433
+
   cvat_server:
     environment:
       CVAT_SERVERLESS: 1
@@ -246,6 +265,17 @@ services:
     environment:
       CVAT_NUCLIO_HOST: ${CVAT_NUCLIO_HOST:-localhost}
       CVAT_NUCLIO_INVOKE_METHOD: 'dashboard'
+
+  cvat_ui: # adapted from docker-compose.dev.yml, needed for custom plugins with UI components such as SAM2
+    build:
+      context: .
+      args:
+        http_proxy:
+        https_proxy:
+        no_proxy:
+        socks_proxy:
+        CLIENT_PLUGINS: ${CLIENT_PLUGINS}
+      dockerfile: Dockerfile.ui
 EOF
 cat <<'EOF' >.env
 CLIENT_PLUGINS=plugins/sam2
