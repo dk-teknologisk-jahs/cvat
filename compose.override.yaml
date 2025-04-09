@@ -1,4 +1,8 @@
 services:
+  cvat_db:
+    ports: [] # No need to expose the database port to the host to avoid conflicts with existing PostgreSQL instances
+    #  - '5433:5432' # Alternatively change host port 5432-->5433 if needed
+
   cvat_server:
     environment:
       CVAT_SERVERLESS: 1
