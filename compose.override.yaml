@@ -1,7 +1,7 @@
 services:
-  cvat_db:
-    ports: [] # No need to expose the database port to the host to avoid conflicts with existing PostgreSQL instances
-    #  - '5433:5432' # Alternatively change host port 5432-->5433 if needed
+  # cvat_db: # For modifying port mapping of DB to avoid conflicts with existing PostgreSQL instances
+  #   ports: [] # Remove mappings (if using docker-compose.dev.yml)
+  #   #  - '5433:5432' # Or instead change host port 5432-->5433
 
   cvat_server:
     environment:
@@ -13,3 +13,14 @@ services:
     environment:
       CVAT_NUCLIO_HOST: ${CVAT_NUCLIO_HOST:-localhost}
       CVAT_NUCLIO_INVOKE_METHOD: 'dashboard'
+
+  cvat_ui: # adapted from docker-compose.dev.yml, needed for custom plugins with UI components such as SAM2
+    build:
+      context: .
+      args:
+        http_proxy:
+        https_proxy:
+        no_proxy:
+        socks_proxy:
+        CLIENT_PLUGINS: ${CLIENT_PLUGINS}
+      dockerfile: Dockerfile.ui
