@@ -24,7 +24,7 @@ const defaultState: SettingsState = {
         showGroundTruth: false,
     },
     workspace: {
-        autoSave: false,
+        autoSave: true,
         autoSaveInterval: 15 * 60 * 1000,
         aamZoomMargin: 100,
         automaticBordering: false,
