@@ -530,6 +530,7 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --network cvat_cvat \
   --name nuclio-dashboard \
+  --restart unless-stopped \
   -e NUCLIO_DASHBOARD_EXTERNAL_IP_ADDRESSES=$USE_NUCLIO_ADDRESS \
   quay.io/nuclio/dashboard:$USE_NUCLIO_VERSION-amd64
 ```
@@ -583,6 +584,7 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --network cvat_cvat \
   --name nuclio-dashboard \
+  --restart unless-stopped \
   -e NUCLIO_DASHBOARD_EXTERNAL_IP_ADDRESSES=$USE_NUCLIO_ADDRESS \
   quay.io/nuclio/dashboard:$USE_NUCLIO_VERSION-amd64
 ```
