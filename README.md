@@ -1,3 +1,33 @@
+# Table of Contents
+- [Changes from upstream at cvat-ai/cvat](#changes-from-upstream-at-cvat-aicvat)
+- [Running this fork of CVAT](#running-this-fork-of-cvat)
+- [Commands used to create this fork (Bash)](#commands-used-to-create-this-fork-bash)
+- [Updating to a new CVAT version](#updating-to-a-new-cvat-version)
+- [Example of running SAM2 on CPU as serverless function on the same PC as CVAT](#example-of-running-sam2-on-cpu-as-serverless-function-on-the-same-pc-as-cvat)
+  - [For Linux PCs (Bash)](#for-linux-pcs-bash)
+  - [For Windows PCs (PowerShell) - Not Tested](#for-windows-pcs-powershell---not-tested)
+- [Example of running SAM2 on GPU as serverless function on the same PC as CVAT](#example-of-running-sam2-on-gpu-as-serverless-function-on-the-same-pc-as-cvat)
+  - [For Windows PCs (WSL)](#for-windows-pcs-wsl)
+- [Example of running SAM2 on GPU as serverless function on separate PC (w. IP: 172.17.155.175)](#example-of-running-sam2-on-gpu-as-serverless-function-on-separate-pc-w-ip-17217155175)
+  - [For Linux PCs (Bash)](#for-linux-pcs-bash-1)
+  - [For Windows PCs (PowerShell) - Not Tested](#for-windows-pcs-powershell---not-tested-1)
+- [Original README from here on](#original-readme-from-here-on)
+  - [Computer Vision Annotation Tool (CVAT)](#computer-vision-annotation-tool-cvat)
+  - [Quick start ⚡](#quick-start-⚡)
+  - [Partners ❤️](#partners-❤️)
+  - [Public datasets](#public-datasets)
+  - [CVAT online: cvat.ai](#cvat-online-cvatai)
+  - [Prebuilt Docker images 🐳](#prebuilt-docker-images-🐳)
+  - [Screencasts 🎦](#screencasts-🎦)
+  - [API](#api)
+  - [SDK](#sdk)
+  - [CLI](#cli)
+  - [Supported annotation formats](#supported-annotation-formats)
+  - [Deep learning serverless functions for automatic labeling](#deep-learning-serverless-functions-for-automatic-labeling)
+  - [License](#license-1)
+  - [Contact us](#contact-us)
+  - [Links](#links)
+
 # Changes from upstream at cvat-ai/cvat
 
 - Added convenience compose files and envvars to more easily run annotation models (nuclio serverless functions) either locally or on a separate server
@@ -431,7 +461,7 @@ export PATH="$NUCLIO_BIN_DIR:$PATH"
 ./serverless/deploy_cpu.sh serverless/pytorch/facebookresearch/sam2
 ```
 
-### For Windows PCs (PowerShell)
+### For Windows PCs (PowerShell) - Not Tested
 
 Requirements:
 - Docker & Docker Compose
@@ -483,6 +513,79 @@ docker compose down
 docker compose up -d --build --force-recreate
 ```
 
+## Example of running SAM2 on GPU as serverless function on the same PC as CVAT:
+
+Run on the same PC to set up the SAM2 serverless plugin for CVAT, running on the GPU (change to deploy_cpu script to run on CPU).
+
+### For Windows PCs (WSL)
+
+Requirements:
+- Docker Desktop. [Follow this link to install](https://docs.docker.com/desktop/setup/install/windows-install/).
+- WSL with a distribution installed. [Follow this link to install](https://learn.microsoft.com/en-us/windows/wsl/install).
+
+Open Powershell and enter the WSL shell (in this example I am using Ubuntu 24.04):
+
+```bash
+wsl -d Ubuntu-24.04
+```
+
+In the WSL shell enter the following commands:
+
+> NOTE:  change `CVAT_ROOT_DIR` and `NUCLIO_BIN_DIR` to the correct path with reference to your system. `CVAT_ROOT_DIR` should be the path where the cvat source code was downloaded in the [setup step](#running-this-fork-of-cvat).
+
+```bash
+# Set variables
+CVAT_ROOT_DIR=/mnt/c/GitHub/cvat # Change this to your CVAT directory
+NUCLIO_BIN_DIR=/mnt/c/GitHub/bin # Change this to the directory where you want to store nuctl
+USE_NUCLIO_VERSION=1.14.0 # Should match nuclio version used by CVAT (1.13.22 and 1.14.1 both failed for CVAT v2.32.0, so sticking with 1.14.0 for now)
+
+# Create directory for nuctl if it doesn't exist
+mkdir -p "$NUCLIO_BIN_DIR"
+
+# Download nuctl executable
+mkdir -p "$NUCLIO_BIN_DIR"
+cd "$NUCLIO_BIN_DIR"
+wget "https://github.com/nuclio/nuclio/releases/download/$USE_NUCLIO_VERSION/nuctl-$USE_NUCLIO_VERSION-linux-amd64"
+chmod +x "nuctl-$USE_NUCLIO_VERSION-linux-amd64"
+ln -sf "nuctl-$USE_NUCLIO_VERSION-linux-amd64" nuctl
+chmod +x nuctl
+
+# Navigate to CVAT root directory, switch to correct branch and pull latest changes
+cd "$CVAT_ROOT_DIR"
+git switch v2.32.0-sam2 # replace with the branch you are using now
+git pull
+
+# Add nuctl to PATH temporarily for this session
+export PATH="$NUCLIO_BIN_DIR:$PATH"
+
+
+# Create & start SAM2 serverless function on CPU
+./serverless/deploy_gpu.sh serverless/pytorch/facebookresearch/sam2
+```
+
+This setup assumes that CVAT and the SAM2 serverless function are running on the same machine.
+
+Ensure that the `.env` file is configured correctly:
+- `CVAT_NUCLIO_HOST=${IP_LOCAL_COMPUTER}`. Substitute `${IP_LOCAL_COMPUTER}` with the IP address of your computer (with `localhost` it will not work when you access the CVAT WebUI from outside the local PC).
+- `CVAT_HOST` with the domain name or the IP address of your computer.
+
+
+Remember to stop and restart CVAT:
+
+```bash
+cd "$CVAT_ROOT_DIR"
+
+# Stop and remove existing containers (should use compose.yaml by default, add -f compose.yaml if not)
+docker compose down
+
+# Rebuild and restart containers (should use compose.yaml by default, add -f compose.yaml if not)
+docker compose up -d --build --force-recreate
+```
+
+
+
+
+
 ## Example of running SAM2 on GPU as serverless function on separate PC (w. IP: 172.17.155.175):
 
 Run on separate server from CVAT server:
@@ -530,12 +633,11 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --network cvat_cvat \
   --name nuclio-dashboard \
-  --restart unless-stopped \
   -e NUCLIO_DASHBOARD_EXTERNAL_IP_ADDRESSES=$USE_NUCLIO_ADDRESS \
   quay.io/nuclio/dashboard:$USE_NUCLIO_VERSION-amd64
 ```
 
-### For Windows PCs (PowerShell)
+### For Windows PCs (PowerShell) - Not Tested
 
 Requirements:
 - Docker & Docker Compose
@@ -584,7 +686,6 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --network cvat_cvat \
   --name nuclio-dashboard \
-  --restart unless-stopped \
   -e NUCLIO_DASHBOARD_EXTERNAL_IP_ADDRESSES=$USE_NUCLIO_ADDRESS \
   quay.io/nuclio/dashboard:$USE_NUCLIO_VERSION-amd64
 ```
