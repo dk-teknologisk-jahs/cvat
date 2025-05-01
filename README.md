@@ -70,8 +70,8 @@ cd cvat
 git remote add upstream https://github.com/cvat-ai/cvat.git
 git remote add hashJoe https://github.com/hashJoe/cvat.git
 
-# Fetch everything
-git fetch --all --tags
+# Fetch all tags from upstream
+git fetch upstream --tags
 
 # Find latest stable version
 git tag -l | sort -V
