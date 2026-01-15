@@ -1,26 +1,96 @@
+# =============================================================================
+# Proxy Configuration
+# =============================================================================
+# These settings enable external internet access for containers that need it.
+# Proxy variables are inherited from the host environment.
+# The no_proxy list includes all internal service names to prevent internal
+# traffic from being routed through the proxy.
+# =============================================================================
+
+x-proxy-env: &proxy-env
+  http_proxy: ${http_proxy:-}
+  https_proxy: ${https_proxy:-}
+  HTTP_PROXY: ${http_proxy:-}
+  HTTPS_PROXY: ${https_proxy:-}
+  no_proxy: clickhouse,grafana,vector,nuclio,opa,cvat-server,cvat_db,cvat_redis_inmem,cvat_redis_ondisk,cvat_clickhouse,cvat_opa,cvat_vector,cvat_grafana,cvat_server,cvat_ui,traefik,localhost,127.0.0.1,.docker.internal,host.docker.internal,${no_proxy:-}
+  NO_PROXY: clickhouse,grafana,vector,nuclio,opa,cvat-server,cvat_db,cvat_redis_inmem,cvat_redis_ondisk,cvat_clickhouse,cvat_opa,cvat_vector,cvat_grafana,cvat_server,cvat_ui,traefik,localhost,127.0.0.1,.docker.internal,host.docker.internal,${no_proxy:-}
+
 services:
   # cvat_db: # For modifying port mapping of DB to avoid conflicts with existing PostgreSQL instances
   #   ports: [] # Remove mappings (if using docker-compose.dev.yml)
   #   #  - '5433:5432' # Or instead change host port 5432-->5433
 
   cvat_server:
+    # Proxy: needed for cloud storage access, external webhooks, API calls
     environment:
+      <<: *proxy-env
       CVAT_SERVERLESS: 1
       CVAT_NUCLIO_HOST: ${CVAT_NUCLIO_HOST:-localhost}
       CVAT_NUCLIO_INVOKE_METHOD: 'dashboard'
 
-  cvat_worker_annotation:
+  cvat_utils:
+    # Proxy: needed for potential external service communication
     environment:
-      CVAT_NUCLIO_HOST: ${CVAT_NUCLIO_HOST:-localhost}
+      <<: *proxy-env
+
+  cvat_worker_annotation:
+    # Proxy: needed for serverless function calls, cloud storage
+    environment:
+      <<: *proxy-env
+      CVAT_NUCLIO_HOST: localhost
       CVAT_NUCLIO_INVOKE_METHOD: 'dashboard'
 
+  cvat_worker_webhooks:
+    # Proxy: needed to deliver webhooks to external URLs
+    environment:
+      <<: *proxy-env
+
+  cvat_worker_import:
+    # Proxy: needed for importing data from cloud storage (S3, GCS, Azure)
+    environment:
+      <<: *proxy-env
+
+  cvat_worker_export:
+    # Proxy: needed for exporting data to cloud storage (S3, GCS, Azure)
+    environment:
+      <<: *proxy-env
+
+  cvat_worker_chunks:
+    # Proxy: needed for cloud storage access when processing video chunks
+    environment:
+      <<: *proxy-env
+
+  cvat_worker_quality_reports:
+    # Proxy: included for consistency with other workers
+    environment:
+      <<: *proxy-env
+
+  cvat_worker_consensus:
+    # Proxy: included for consistency with other workers
+    environment:
+      <<: *proxy-env
+
   cvat_ui: # adapted from docker-compose.dev.yml, needed for custom plugins with UI components such as SAM2
+    # Proxy: build args needed for npm to fetch packages during image build
+    environment:
+      <<: *proxy-env
     build:
       context: .
       args:
-        http_proxy:
-        https_proxy:
-        no_proxy:
-        socks_proxy:
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        no_proxy: ${no_proxy:-}
         CLIENT_PLUGINS: ${CLIENT_PLUGINS}
       dockerfile: Dockerfile.ui
+
+  cvat_grafana:
+    # Proxy: CRITICAL - needed to download the ClickHouse plugin from GitHub on startup
+    # Without this, the container fails with "dial tcp: i/o timeout" and restarts continuously
+    environment:
+      <<: *proxy-env
+
+  traefik:
+    # Proxy: needed for Let's Encrypt ACME certificate requests/renewals
+    environment:
+      <<: *proxy-env
+

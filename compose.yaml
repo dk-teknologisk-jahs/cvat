@@ -1,6 +1,7 @@
 include:
   - path:
     - ./docker-compose.yml
+    - ./docker-compose.https.yml
     #- ./docker-compose.dev.yml # should not be necessary (warning: will expose stuff like the database on port 5432)
     - ./components/serverless/docker-compose.serverless.yml
     - ./compose.override.yaml
