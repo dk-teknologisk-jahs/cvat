@@ -26,7 +26,6 @@
  *   - point_labels: [batch, num_points] FLOAT32
  *   - mask_input: [batch, 1, 288, 288] FLOAT32 (previous low-res mask logits)
  *   - has_mask_input: [batch] FLOAT32 (1.0 if mask_input is valid)
- *   - orig_im_size: [2] INT32 ([H, W])
  *
  * Outputs:
  *   - iou_scores/iou_predictions: [batch, 1, 3] or [batch, 3] FLOAT32
@@ -159,7 +158,6 @@ if ((self as any).importScripts) {
                     new Float32Array([hasMaskFromCaller ? 1.0 : 0.0]),
                     [1],
                 );
-                const origImSize = new Tensor('int32', new Int32Array([1008, 1008]), [2]);
 
                 // Reshape point inputs from [1, 1, N, 2] to [1, N, 2]
                 const pointsData = inputs.input_points.data as Float32Array;
@@ -174,7 +172,6 @@ if ((self as any).importScripts) {
                     point_labels: new Tensor('float32', labelsData, [1, numPoints]),
                     mask_input: maskInputData,
                     has_mask_input: hasMaskInputData,
-                    orig_im_size: origImSize,
                 };
             } else {
                 // Standard decoder (usls export) - no mask input
