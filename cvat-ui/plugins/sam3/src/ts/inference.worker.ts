@@ -10,9 +10,9 @@
  *
  * ONNX Model: tracker-prompt-encoder-mask-decoder-with-mask-input.onnx (17 MB)
  *
- * Inputs (standard decoder - no mask input support):
+ * Inputs (standard decoder - usls export, no mask input support):
  *   - input_points: [batch, 1, num_points, 2] FLOAT32
- *   - input_labels: [batch, 1, num_points] FLOAT32 (1=pos, 0=neg)
+ *   - input_labels: [batch, 1, num_points] INT64 (1=pos, 0=neg)
  *   - input_boxes: [batch, num_boxes, 4] FLOAT32 (xyxy scaled to 1008)
  *   - image_embeddings.0: [batch, 32, 288, 288] FLOAT32
  *   - image_embeddings.1: [batch, 64, 144, 144] FLOAT32
@@ -22,16 +22,16 @@
  *   - image_embed: [batch, 256, 72, 72] FLOAT32
  *   - high_res_feats_0: [batch, 32, 288, 288] FLOAT32
  *   - high_res_feats_1: [batch, 64, 144, 144] FLOAT32
- *   - point_coords: [batch, num_points, 2] FLOAT32
- *   - point_labels: [batch, num_points] FLOAT32
+ *   - point_coords: [batch, num_points, 2] FLOAT32 (includes box corners as points)
+ *   - point_labels: [batch, num_points] FLOAT32 (0=neg, 1=pos, -1=pad, 2=box TL, 3=box BR)
  *   - mask_input: [batch, 1, 288, 288] FLOAT32 (previous low-res mask logits)
  *   - has_mask_input: [batch] FLOAT32 (1.0 if mask_input is valid)
  *
  * Outputs:
- *   - iou_scores/iou_predictions: [batch, 1, 3] or [batch, 3] FLOAT32
- *   - pred_masks/masks: [batch, 1, 3, H, W] or [batch, 3, H, W] FLOAT32
- *   - low_res_masks: [batch, 3, 288, 288] FLOAT32 (for mask refinement)
- *   - object_score_logits: [batch, 1, 1] or [batch, 1] FLOAT32 (optional)
+ *   - iou_scores/iou_predictions: [batch, 2] or [batch, 3] FLOAT32
+ *   - pred_masks/masks: [batch, 2, H, W] or [batch, 3, H, W] FLOAT32
+ *   - low_res_masks: [batch, 2, 288, 288] or [batch, 3, 288, 288] FLOAT32
+ *   - object_score_logits: [batch, 1] FLOAT32
  */
 
 import { InferenceSession, env, Tensor } from 'onnxruntime-web';
@@ -159,17 +159,54 @@ if ((self as any).importScripts) {
                     [1],
                 );
 
-                // Reshape point inputs from [1, 1, N, 2] to [1, N, 2]
-                const pointsData = inputs.input_points.data as Float32Array;
-                const labelsData = inputs.input_labels.data as Float32Array;
-                const numPoints = inputs.input_points.dims[2] as number;
+                // Get existing points from input_points [1, 1, N, 2] and input_labels [1, 1, N]
+                const existingPointsData = inputs.input_points.data as Float32Array;
+                const existingLabelsData = inputs.input_labels.data as Float32Array;
+                const numExistingPoints = inputs.input_points.dims[2] as number;
+
+                // Get boxes from input_boxes [1, num_boxes, 4]
+                // For custom decoder, convert boxes to point pairs with labels 2 (top-left) and 3 (bottom-right)
+                const boxesData = inputs.input_boxes?.data as Float32Array | undefined;
+                const numBoxes = (inputs.input_boxes?.dims?.[1] as number) || 0;
+
+                // Total points = existing points + 2 points per box (top-left, bottom-right)
+                const totalPoints = numExistingPoints + numBoxes * 2;
+
+                // Create combined arrays
+                const allPointCoords = new Float32Array(totalPoints * 2);
+                const allPointLabels = new Float32Array(totalPoints);
+
+                // Copy existing points
+                for (let i = 0; i < numExistingPoints; i++) {
+                    allPointCoords[i * 2] = existingPointsData[i * 2];
+                    allPointCoords[i * 2 + 1] = existingPointsData[i * 2 + 1];
+                    allPointLabels[i] = existingLabelsData[i];
+                }
+
+                // Add box corners as points
+                if (boxesData && numBoxes > 0) {
+                    for (let i = 0; i < numBoxes; i++) {
+                        const boxOffset = i * 4;
+                        const pointOffset = numExistingPoints + i * 2;
+
+                        // Top-left corner (label 2)
+                        allPointCoords[pointOffset * 2] = boxesData[boxOffset];  // x1
+                        allPointCoords[pointOffset * 2 + 1] = boxesData[boxOffset + 1];  // y1
+                        allPointLabels[pointOffset] = 2;
+
+                        // Bottom-right corner (label 3)
+                        allPointCoords[(pointOffset + 1) * 2] = boxesData[boxOffset + 2];  // x2
+                        allPointCoords[(pointOffset + 1) * 2 + 1] = boxesData[boxOffset + 3];  // y2
+                        allPointLabels[pointOffset + 1] = 3;
+                    }
+                }
 
                 runInputs = {
                     image_embed: emb2,  // [1, 256, 72, 72]
                     high_res_feats_0: emb0,  // [1, 32, 288, 288]
                     high_res_feats_1: emb1,  // [1, 64, 144, 144]
-                    point_coords: new Tensor('float32', pointsData, [1, numPoints, 2]),
-                    point_labels: new Tensor('float32', labelsData, [1, numPoints]),
+                    point_coords: new Tensor('float32', allPointCoords, [1, totalPoints, 2]),
+                    point_labels: new Tensor('float32', allPointLabels, [1, totalPoints]),
                     mask_input: maskInputData,
                     has_mask_input: hasMaskInputData,
                 };
