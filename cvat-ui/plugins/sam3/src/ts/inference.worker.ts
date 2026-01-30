@@ -316,12 +316,12 @@ if ((self as any).importScripts) {
                     const lowResH = 288;
                     const lowResW = 288;
                     const lowResMaskSize = lowResH * lowResW;
-                    const bestLowResMask = new Float32Array(lowResMaskSize);
+                    const lowResMaskData = new Float32Array(lowResMaskSize);
                     const lowResOffset = bestIdx * lowResMaskSize;
                     for (let i = 0; i < lowResMaskSize; i++) {
-                        bestLowResMask[i] = lowResData[lowResOffset + i];
+                        lowResMaskData[i] = lowResData[lowResOffset + i];
                     }
-                    lowResMask = new Tensor('float32', bestLowResMask, [1, 1, lowResH, lowResW]);
+                    lowResMask = new Tensor('float32', lowResMaskData, [1, 1, lowResH, lowResW]);
                 }
 
                 postMessage({
@@ -336,7 +336,7 @@ if ((self as any).importScripts) {
                         ytl: ytl / maskH,
                         xbr: xbr / maskW,
                         ybr: ybr / maskH,
-                        lowResMask,  // For mask refinement on next click
+                        lowResMask,
                     } as DecodeResult,
                 });
             }).catch((error: unknown) => {

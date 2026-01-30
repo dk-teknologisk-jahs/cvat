@@ -401,7 +401,7 @@ const sam3Plugin: SAM3Plugin = {
                                         plugin.data.lowResMaskCache.set(key, lowResMask);
                                     }
 
-                                    // Convert mask tensor to 2D array at original image resolution
+                                    // Extract mask data from Tensor
                                     const maskData = mask.data as Float32Array;
 
                                     // Resize mask from decoder resolution to image resolution
