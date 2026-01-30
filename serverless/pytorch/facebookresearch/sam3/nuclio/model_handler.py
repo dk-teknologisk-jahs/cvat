@@ -28,7 +28,7 @@ class ModelHandler:
     def __init__(self):
         model_path = os.environ.get(
             "SAM3_ENCODER_PATH",
-            "/opt/nuclio/sam3/tracker-vision-encoder.onnx"
+            "/opt/nuclio/sam3/vision_encoder.onnx"
         )
 
         # Configure ONNX Runtime for GPU

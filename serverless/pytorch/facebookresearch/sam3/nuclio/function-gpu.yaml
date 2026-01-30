@@ -27,7 +27,7 @@ spec:
 
   build:
     image: cvat.pth.facebookresearch.sam3.tracker:latest-gpu
-    baseImage: nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+    baseImage: nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
     directives:
       preCopy:
@@ -47,10 +47,11 @@ spec:
         - kind: RUN
           value: pip3 install numpy pillow onnxruntime-gpu
       # download SAM3-Tracker ONNX encoder from HuggingFace (full precision for max accuracy)
+      # Note: The ONNX model internally references 'vision_encoder.onnx_data' as external data
         - kind: RUN
           value: |
-            curl -L -o tracker-vision-encoder.onnx "https://huggingface.co/onnx-community/sam3-tracker-ONNX/resolve/main/onnx/vision_encoder.onnx" && \
-            curl -L -o tracker-vision-encoder.onnx_data "https://huggingface.co/onnx-community/sam3-tracker-ONNX/resolve/main/onnx/vision_encoder.onnx_data"
+            curl -L -o vision_encoder.onnx "https://huggingface.co/onnx-community/sam3-tracker-ONNX/resolve/main/onnx/vision_encoder.onnx" && \
+            curl -L -o vision_encoder.onnx_data "https://huggingface.co/onnx-community/sam3-tracker-ONNX/resolve/main/onnx/vision_encoder.onnx_data"
       # map pip3 and python3 to pip and python
         - kind: RUN
           value: ln -s /usr/bin/pip3 /usr/local/bin/pip && ln -s /usr/bin/python3 /usr/bin/python
