@@ -212,9 +212,16 @@ if ((self as any).importScripts) {
                 };
             } else {
                 // Standard decoder (usls export) - no mask input
+                // The usls decoder expects input_labels as INT64, so convert from float32
+                const labelsFloat = inputs.input_labels.data as Float32Array;
+                const labelsInt64 = new BigInt64Array(labelsFloat.length);
+                for (let i = 0; i < labelsFloat.length; i++) {
+                    labelsInt64[i] = BigInt(Math.round(labelsFloat[i]));
+                }
+
                 runInputs = {
                     input_points: inputs.input_points,
-                    input_labels: inputs.input_labels,
+                    input_labels: new Tensor('int64', labelsInt64, inputs.input_labels.dims as number[]),
                     input_boxes: inputs.input_boxes,
                     'image_embeddings.0': inputs['image_embeddings.0'],
                     'image_embeddings.1': inputs['image_embeddings.1'],

@@ -445,7 +445,8 @@ const sam3Plugin: SAM3Plugin = {
         worker: new Worker(new URL('./inference.worker', import.meta.url)),
         jobs: {},
         modelID: 'pth-facebookresearch-sam3-tracker',
-        modelURL: '/assets/tracker-prompt-encoder-mask-decoder-with-mask-input.onnx',
+        // Use usls decoder (has trained weights) - mask refinement not yet supported
+        modelURL: '/assets/tracker-prompt-encoder-mask-decoder.onnx',
         emb0Cache: new LRUCache({
             // [1, 32, 288, 288] float32 = ~38 MB per frame, max 8 frames = ~300 MB
             max: 8,
