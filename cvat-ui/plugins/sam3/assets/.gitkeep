@@ -1,0 +1,11 @@
+# This file keeps the assets directory in git.
+#
+# The default decoder is the custom export with mask refinement support:
+# - tracker-prompt-encoder-mask-decoder-with-mask-input.onnx (17MB) **default**
+#
+# To generate it, run the export script in serverless/pytorch/facebookresearch/sam3/nuclio/:
+#   python export_decoder_with_mask_input.py --checkpoint auto --output <path>
+#
+# Alternatively, download pre-built decoders from usls (no mask refinement):
+# wget -O tracker-prompt-encoder-mask-decoder.onnx \
+#   "https://github.com/jamjamjon/assets/releases/download/sam3/tracker-prompt-encoder-mask-decoder.onnx"

@@ -1,0 +1,75 @@
+# Copyright (C) 2024 CVAT.ai Corporation
+#
+# SPDX-License-Identifier: MIT
+
+metadata:
+  name: pth-facebookresearch-sam3-tracker
+  namespace: cvat
+  annotations:
+    name: Segment Anything 3
+    version: 1
+    type: interactor
+    spec:
+    min_pos_points: 1
+    min_neg_points: 0
+    startswith_box_optional: true
+    animated_gif: https://raw.githubusercontent.com/cvat-ai/cvat/develop/site/content/en/images/hrnet_example.gif
+    help_message: SAM3 interactor allows to get a mask using points and boxes. Supports 270K+ concepts with improved accuracy over SAM2.
+
+spec:
+  description: Interactive object segmentation with Segment Anything 3 (SAM3-Tracker)
+  runtime: 'python:3.10'
+  handler: main:handler
+  eventTimeout: 60s
+  env:
+    - name: PYTHONPATH
+      value: /opt/nuclio/sam3
+
+  build:
+    image: cvat.pth.facebookresearch.sam3.tracker:latest-gpu
+    baseImage: nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+
+    directives:
+      preCopy:
+      # set NVIDIA container runtime settings
+        - kind: ENV
+          value: NVIDIA_VISIBLE_DEVICES=all
+      # disable interactive frontend
+        - kind: ENV
+          value: DEBIAN_FRONTEND=noninteractive
+      # set workdir
+        - kind: WORKDIR
+          value: /opt/nuclio/sam3
+      # install basic deps
+        - kind: RUN
+          value: apt-get update && apt-get -y install curl git python3 python3-pip ffmpeg libsm6 libxext6
+      # install Python deps
+        - kind: RUN
+          value: pip3 install numpy pillow onnxruntime-gpu
+      # download SAM3-Tracker ONNX encoder from HuggingFace (full precision for max accuracy)
+        - kind: RUN
+          value: |
+            curl -L -o tracker-vision-encoder.onnx "https://huggingface.co/onnx-community/sam3-tracker-ONNX/resolve/main/onnx/vision_encoder.onnx" && \
+            curl -L -o tracker-vision-encoder.onnx_data "https://huggingface.co/onnx-community/sam3-tracker-ONNX/resolve/main/onnx/vision_encoder.onnx_data"
+      # map pip3 and python3 to pip and python
+        - kind: RUN
+          value: ln -s /usr/bin/pip3 /usr/local/bin/pip && ln -s /usr/bin/python3 /usr/bin/python
+
+  triggers:
+    myHttpTrigger:
+      maxWorkers: 1
+      kind: 'http'
+      workerAvailabilityTimeoutMilliseconds: 10000
+      attributes:
+        maxRequestBodySize: 67108864 # 64MB for large embeddings
+
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 3
+      mountMode: volume
