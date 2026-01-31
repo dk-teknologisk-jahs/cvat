@@ -2,6 +2,63 @@
 
 This document describes how to export SAM3-Tracker ONNX models that match SAM2's browser-side decoder functionality, including mask refinement and in-model interpolation.
 
+---
+
+## Key Findings from Official SAM3 Implementation
+
+### 1. Dynamic Mask Selection (`_dynamic_multimask_via_stability`)
+
+The official SAM3 decoder outputs **3 masks** in multimask mode:
+- **Mask 0**: "Single object" token - designed for non-ambiguous prompts (multiple points)
+- **Masks 1-2**: "Multi-object" tokens - designed for ambiguous prompts (single click)
+
+**Selection logic** (from `sam3/sam/mask_decoder.py`):
+
+```python
+# For SINGLE prompt (ambiguous): select best IoU from multi-mask outputs (masks 1-2)
+# For MULTIPLE prompts (non-ambiguous): use mask 0 if stable, else best multi-mask
+
+stability = area(logits > delta) / area(logits > -delta)  # delta=0.05
+if stability >= 0.95:
+    use_mask_0()
+else:
+    use_best_multimask()  # max IoU from masks 1-2
+```
+
+**Browser implementation** must replicate this logic to avoid holes and disconnected regions.
+
+### 2. Mask Refinement is Critical for Multi-Click
+
+From `sam3/model/sam1_task_predictor.py`:
+- `mask_input`: Previous low-res mask logits `[B, 1, 288, 288]`
+- `has_mask_input`: Whether mask_input is valid
+
+**Why it matters**: Without mask refinement, each click generates **independent predictions** that may conflict. With mask refinement, new clicks **refine** the previous mask, producing coherent results.
+
+The CVAT SAM2 plugin properly uses this:
+```typescript
+const isLowResMaskRelevant = clicks.slice(0, -1) === lastClicks;
+// Pass previous low_res_mask if adding to existing annotation
+```
+
+### 3. Hole Filling Post-Processing
+
+From `sam3/model/utils/sam1_utils.py` (`SAM2Transforms`):
+```python
+mask_threshold = 0.0
+max_hole_area = 256.0    # Fill holes up to 256 pixels
+max_sprinkle_area = 0.0  # Remove small disconnected regions
+```
+
+This uses **connected component analysis** to:
+1. Find small holes (background regions) inside the mask
+2. Fill holes ≤ `max_hole_area` pixels
+3. Optionally remove small "sprinkles" (noise)
+
+**Note**: This requires CUDA-accelerated connected components (`sam3.perflib`), which is not available in browser. Alternative: morphological operations in JavaScript.
+
+---
+
 ## Current State Comparison
 
 ### SAM2 Decoder ONNX (Working Reference)
@@ -593,3 +650,127 @@ print(f"Bounding box: ({xtl}, {ytl}) - ({xbr}, {ybr})")
 | ONNX opset | 11 | 17 (for Resize with half_pixel) |
 
 With these changes, the SAM3 decoder would have identical interface to SAM2, enabling drop-in replacement in CVAT's browser-side inference.
+
+---
+
+## Browser-Side Workarounds (Current Implementation)
+
+Until a SAM2-compatible ONNX decoder is available, the CVAT SAM3 plugin implements these workarounds in JavaScript:
+
+### 1. Dynamic Mask Selection (Matching SAM3's `_dynamic_multimask_via_stability`)
+
+```typescript
+// From inference.worker.ts
+const STABILITY_DELTA = 0.05;
+const STABILITY_THRESH = 0.95;
+
+// Compute stability for each mask
+const stability = areaInner / areaUnion;  // (logits > delta) / (logits > -delta)
+
+if (totalPrompts === 1) {
+    // SINGLE prompt (ambiguous) → best IoU from masks 1-2
+    bestIdx = argmax(iou[1:]);
+} else {
+    // MULTIPLE prompts (non-ambiguous) → mask 0 if stable
+    if (stability[0] >= STABILITY_THRESH) {
+        bestIdx = 0;
+    } else {
+        bestIdx = argmax(iou[1:]);  // Fall back to best multi-mask
+    }
+}
+```
+
+**Why this matters**: Without proper mask selection, multi-click scenarios produce holes and disconnected patches because masks 1-2 are optimized for ambiguous single-click cases.
+
+### 2. JavaScript Bilinear Interpolation (align_corners=False)
+
+```typescript
+// Coordinate mapping matching PyTorch F.interpolate(align_corners=False)
+const srcX = (dstX + 0.5) * scaleX - 0.5;
+const srcY = (dstY + 0.5) * scaleY - 0.5;
+
+// Bilinear sampling with proper edge clamping
+function bilinearSample(data, w, h, x, y) {
+    const x0 = Math.max(0, Math.min(w - 1, Math.floor(x)));
+    const y0 = Math.max(0, Math.min(h - 1, Math.floor(y)));
+    const x1 = Math.min(w - 1, x0 + 1);
+    const y1 = Math.min(h - 1, y0 + 1);
+    // ... weighted average of 4 neighbors
+}
+```
+
+**Key insight**: Interpolate **logits** (not probabilities), then threshold at 0. This produces smoother edges.
+
+### 3. Bounding Box Optimization
+
+Computing bbox on low-res mask first, then only interpolating within that region:
+
+```typescript
+// Step 1: Find bbox on 288×288 mask (fast - 82K pixels)
+for (y, x in lowResMask) {
+    if (logit > 0) updateBbox(x, y);
+}
+
+// Step 2: Map to high-res coordinates with padding
+dstMinX = floor((srcMinX - padding + 0.5) / scale - 0.5);
+// ...
+
+// Step 3: Only interpolate within cropped region (~5% of pixels)
+for (y in croppedH) {
+    for (x in croppedW) {
+        // Bilinear interpolate only this region
+    }
+}
+```
+
+This reduces interpolation from 12M pixels (3024×4032) to ~100K pixels.
+
+### 4. Mask Refinement (When Decoder Supports It)
+
+```typescript
+// Check if we should use mask refinement
+const isLowResMaskRelevant =
+    JSON.stringify(clicks.slice(0, -1)) === JSON.stringify(lastClicks);
+
+const useMaskRefinement =
+    supportsMaskInput &&
+    lowResMaskCache.has(key) &&
+    isLowResMaskRelevant;
+
+// Pass previous mask to decoder
+const inputs = {
+    mask_input: useMaskRefinement ? lowResMaskCache.get(key) : zeros,
+    has_mask_input: useMaskRefinement ? 1.0 : 0.0,
+};
+```
+
+**Note**: The current usls-exported decoder does NOT support mask_input. This requires re-exporting with the custom wrapper script.
+
+### 5. Future: Hole Filling (Not Yet Implemented)
+
+Browser-side alternative to SAM3's connected component hole filling:
+
+```typescript
+// Simple morphological closing (dilation then erosion)
+function fillSmallHoles(mask, maxHoleSize) {
+    // 1. Dilate mask (expand foreground)
+    const dilated = dilate(mask, kernelSize);
+    // 2. Erode back (shrink foreground, but holes are filled)
+    const closed = erode(dilated, kernelSize);
+    return closed;
+}
+```
+
+Or use WebGL/WebGPU for accelerated connected component labeling.
+
+---
+
+## Comparison: Reference Implementations
+
+| Feature | Official SAM3 (Python) | usls (Rust) | CVAT SAM3 (Browser) |
+|---------|----------------------|-------------|---------------------|
+| Mask selection | `_dynamic_multimask_via_stability` | Max IoU only | Dynamic stability ✅ |
+| Hole filling | `max_hole_area=256` | None | None (TODO) |
+| Mask refinement | `mask_input` / `has_mask_input` | None | Partial ✅ |
+| Interpolation | `F.interpolate(align_corners=False)` | `interpolate_1d_u8` | JS bilinear ✅ |
+| Threshold | Logits > 0 | Probs > 0.5 | Logits > 0 ✅ |

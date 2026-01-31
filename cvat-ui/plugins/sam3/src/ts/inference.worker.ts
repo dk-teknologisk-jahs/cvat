@@ -323,23 +323,29 @@ if ((self as any).importScripts) {
                 const maskSize = maskH * maskW;
                 const iouData = iouScores.data as Float32Array;
 
-                // Stability-aware mask selection (matching SAM3's dynamic_multimask_via_stability)
-                // Stability score measures how "confident" the mask boundaries are.
-                // Formula: stability = count(logits > delta) / count(logits > -delta)
-                // Higher stability = sharper, more confident boundaries
+                // Count number of real prompts (non-padding points)
+                const labelsData = inputs.input_labels.data as Float32Array;
+                const numRealPoints = Array.from(labelsData).filter((l) => l >= 0).length;
+                const numBoxes = (inputs.input_boxes?.dims?.[1] as number) || 0;
+                const totalPrompts = numRealPoints + numBoxes;
+
+                // SAM3 dynamic mask selection (matching _dynamic_multimask_via_stability)
+                // When multimask=True, mask 0 is "single object" token, masks 1-2 are "multi-object" tokens
+                //
+                // Logic:
+                // 1. For SINGLE prompt (ambiguous): select best IoU from multi-mask outputs (masks 1-2)
+                // 2. For MULTIPLE prompts (non-ambiguous): use mask 0 if stable, else best multi-mask
+                //
+                // Stability: stability = area(logits > delta) / area(logits > -delta)
                 const STABILITY_DELTA = 0.05;  // SAM3 default: dynamic_multimask_stability_delta
-                const STABILITY_WEIGHT = 0.5;  // How much to weight stability vs IoU
+                const STABILITY_THRESH = 0.95;  // SAM3 default: dynamic_multimask_stability_thresh
 
-                let bestIdx = 0;
-                let bestScore = -Infinity;
-
-                console.log('  Mask selection with stability:');
+                // Compute stability scores for all masks
+                const stabilityScores: number[] = [];
                 for (let i = 0; i < numMasks; i++) {
                     const maskOffset = i * maskSize;
-
-                    // Compute stability score for this mask
-                    let areaInner = 0;  // Confident foreground (logits > delta)
-                    let areaUnion = 0;  // Not confident background (logits > -delta)
+                    let areaInner = 0;  // logits > delta (confident foreground)
+                    let areaUnion = 0;  // logits > -delta (not confident background)
 
                     for (let j = 0; j < maskSize; j++) {
                         const logit = maskData[maskOffset + j];
@@ -347,23 +353,57 @@ if ((self as any).importScripts) {
                         if (logit > -STABILITY_DELTA) areaUnion++;
                     }
 
-                    const stability = areaUnion > 0 ? areaInner / areaUnion : 1.0;
-                    const iou = iouData[i];
+                    stabilityScores.push(areaUnion > 0 ? areaInner / areaUnion : 1.0);
+                }
 
-                    // Combined score: weight IoU and stability
-                    // SAM3 uses stability as a threshold, but weighting works better for selection
-                    const combinedScore = iou * (1 - STABILITY_WEIGHT) + stability * STABILITY_WEIGHT;
+                let bestIdx: number;
+                let selectionReason: string;
 
-                    console.log(`    Mask ${i}: IoU=${iou.toFixed(3)}, stability=${stability.toFixed(3)}, ` +
-                        `combined=${combinedScore.toFixed(3)}`);
+                console.log(`  Prompts: ${totalPrompts} (${numRealPoints} points, ${numBoxes} boxes)`);
 
-                    if (combinedScore > bestScore) {
-                        bestScore = combinedScore;
-                        bestIdx = i;
+                if (totalPrompts === 1) {
+                    // SINGLE prompt (ambiguous) - select best IoU from multi-mask outputs (masks 1+)
+                    // Mask 0 is the "single object" token, not ideal for ambiguous cases
+                    bestIdx = 1;  // Start with mask 1
+                    let bestMultiIou = iouData[1] || 0;
+
+                    for (let i = 2; i < numMasks; i++) {
+                        if (iouData[i] > bestMultiIou) {
+                            bestMultiIou = iouData[i];
+                            bestIdx = i;
+                        }
+                    }
+                    selectionReason = `single prompt → best multi-mask (IoU=${bestMultiIou.toFixed(3)})`;
+                } else {
+                    // MULTIPLE prompts (non-ambiguous) - prefer mask 0 if stable
+                    const mask0Stability = stabilityScores[0];
+                    const isStable = mask0Stability >= STABILITY_THRESH;
+
+                    if (isStable) {
+                        bestIdx = 0;
+                        selectionReason = `multiple prompts, mask 0 stable (${mask0Stability.toFixed(3)} >= ${STABILITY_THRESH})`;
+                    } else {
+                        // Fall back to best multi-mask
+                        bestIdx = 1;
+                        let bestMultiIou = iouData[1] || 0;
+
+                        for (let i = 2; i < numMasks; i++) {
+                            if (iouData[i] > bestMultiIou) {
+                                bestMultiIou = iouData[i];
+                                bestIdx = i;
+                            }
+                        }
+                        selectionReason = `multiple prompts, mask 0 unstable (${mask0Stability.toFixed(3)} < ${STABILITY_THRESH}) → best multi-mask`;
                     }
                 }
 
-                console.log(`  Selected mask ${bestIdx} (combined score: ${bestScore.toFixed(3)})`);
+                console.log('  Mask selection:');
+                for (let i = 0; i < numMasks; i++) {
+                    const marker = i === bestIdx ? ' ← SELECTED' : '';
+                    console.log(`    Mask ${i}: IoU=${iouData[i]?.toFixed(3) || 'N/A'}, ` +
+                        `stability=${stabilityScores[i].toFixed(3)}${marker}`);
+                }
+                console.log(`  Selection reason: ${selectionReason}`);
 
                 // Extract the best mask as LOGITS (not probabilities!)
                 const maskOffset = bestIdx * maskSize;
