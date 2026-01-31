@@ -435,9 +435,9 @@ const sam3Plugin: SAM3Plugin = {
                                     }
 
                                     // Following official SAM3 and usls implementations:
-                                    // Resize full mask to full image size (no bounding box cropping)
-                                    // This gives smoother edges because we interpolate at high resolution
-                                    const fullMask = resizeMaskToFullImage(
+                                    // Compute bbox on low-res mask, then interpolate only within that region
+                                    // This is MUCH faster for large images (97%+ fewer pixels to process)
+                                    const { mask: croppedMask, bounds: pixelBounds } = resizeMaskWithBbox(
                                         maskData,
                                         maskW,
                                         maskH,
@@ -445,21 +445,18 @@ const sam3Plugin: SAM3Plugin = {
                                         imHeight,
                                     );
 
-                                    // Bounds cover the full image
-                                    const pixelBounds: [number, number, number, number] = [
-                                        0, 0, imWidth - 1, imHeight - 1,
-                                    ];
-
                                     // Debug: log final result
-                                    const finalPositive = fullMask.flat().filter((v) => v > 0).length;
+                                    const finalPositive = croppedMask.flat().filter((v) => v > 0).length;
+                                    const croppedH = croppedMask.length;
+                                    const croppedW = croppedMask[0]?.length || 0;
                                     console.log(`SAM3 final result: image=${imWidth}x${imHeight}, ` +
-                                        `fullMask=${fullMask[0]?.length || 0}x${fullMask.length}, ` +
-                                        `positivePixels=${finalPositive}/${imWidth * imHeight}`);
+                                        `croppedMask=${croppedW}x${croppedH} (${((croppedW * croppedH) / (imWidth * imHeight) * 100).toFixed(1)}% of image), ` +
+                                        `positivePixels=${finalPositive}/${croppedW * croppedH}`);
 
                                     plugin.data.lastClicks = clicks;
 
                                     const result = {
-                                        mask: fullMask,
+                                        mask: croppedMask,
                                         bounds: pixelBounds,
                                     };
                                     console.log('SAM3 resolving with:', result);
@@ -572,40 +569,93 @@ function bilinearSample(
  * SAM2's decoder has upsampling built-in and outputs at target resolution,
  * while SAM3's decoder outputs fixed 288x288 requiring external upsampling.
  *
- * Following official SAM3 and usls implementations, we resize the full mask
- * to the full image dimensions (no bounding box cropping).
+ * Optimized mask resizing: compute bbox on low-res mask, then only interpolate within that region.
+ * This avoids interpolating millions of pixels for large images.
  */
-function resizeMaskToFullImage(
+function resizeMaskWithBbox(
     maskLogits: ArrayLike<number>,  // LOGITS, not probabilities - threshold at 0
     srcW: number,
     srcH: number,
     dstW: number,
     dstH: number,
-): number[][] {
-    const result: number[][] = Array(dstH).fill(0).map(() => Array(dstW).fill(0));
+): { mask: number[][]; bounds: [number, number, number, number] } {
+    // Step 1: Find bounding box on low-res mask (fast - only 288x288 = 82944 pixels)
+    let srcMinX = srcW;
+    let srcMinY = srcH;
+    let srcMaxX = -1;
+    let srcMaxY = -1;
 
-    // Precompute scale factors for align_corners=False mapping
+    for (let y = 0; y < srcH; y++) {
+        for (let x = 0; x < srcW; x++) {
+            const idx = y * srcW + x;
+            if (maskLogits[idx] > 0) {
+                srcMinX = Math.min(srcMinX, x);
+                srcMinY = Math.min(srcMinY, y);
+                srcMaxX = Math.max(srcMaxX, x);
+                srcMaxY = Math.max(srcMaxY, y);
+            }
+        }
+    }
+
+    // If no positive pixels, return empty mask
+    if (srcMaxX < 0) {
+        return {
+            mask: [[0]],
+            bounds: [0, 0, 0, 0],
+        };
+    }
+
+    // Step 2: Convert low-res bbox to high-res coordinates
+    // Using align_corners=False inverse mapping: dst = (src + 0.5) / scale - 0.5
     const scaleX = srcW / dstW;
     const scaleY = srcH / dstH;
 
-    for (let y = 0; y < dstH; y++) {
-        for (let x = 0; x < dstW; x++) {
-            // Map destination coords to source mask coords using align_corners=False
-            // Formula: src = (dst + 0.5) * scale - 0.5
-            // This treats pixels as having area and maps centers to centers
-            const srcX = (x + 0.5) * scaleX - 0.5;
-            const srcY = (y + 0.5) * scaleY - 0.5;
+    // Map source bbox corners to destination coordinates
+    // Add generous padding (equivalent to ~10 source pixels) to avoid edge artifacts
+    const paddingSrc = 10;
 
-            // Bilinear interpolation of LOGITS (matching PyTorch F.interpolate)
+    // Convert with padding
+    let dstMinX = Math.floor((srcMinX - paddingSrc + 0.5) / scaleX - 0.5);
+    let dstMinY = Math.floor((srcMinY - paddingSrc + 0.5) / scaleY - 0.5);
+    let dstMaxX = Math.ceil((srcMaxX + paddingSrc + 0.5) / scaleX - 0.5);
+    let dstMaxY = Math.ceil((srcMaxY + paddingSrc + 0.5) / scaleY - 0.5);
+
+    // Clamp to image bounds
+    dstMinX = Math.max(0, dstMinX);
+    dstMinY = Math.max(0, dstMinY);
+    dstMaxX = Math.min(dstW - 1, dstMaxX);
+    dstMaxY = Math.min(dstH - 1, dstMaxY);
+
+    const croppedW = dstMaxX - dstMinX + 1;
+    const croppedH = dstMaxY - dstMinY + 1;
+
+    console.log(`SAM3 bbox optimization: src bbox [${srcMinX},${srcMinY}]-[${srcMaxX},${srcMaxY}] ` +
+        `→ dst bbox [${dstMinX},${dstMinY}]-[${dstMaxX},${dstMaxY}] (${croppedW}x${croppedH} vs ${dstW}x${dstH})`);
+
+    // Step 3: Only interpolate within the cropped region
+    const result: number[][] = Array(croppedH).fill(0).map(() => Array(croppedW).fill(0));
+
+    for (let y = 0; y < croppedH; y++) {
+        const dstY = y + dstMinY;
+        for (let x = 0; x < croppedW; x++) {
+            const dstX = x + dstMinX;
+
+            // Map destination coords to source mask coords using align_corners=False
+            const srcX = (dstX + 0.5) * scaleX - 0.5;
+            const srcY = (dstY + 0.5) * scaleY - 0.5;
+
+            // Bilinear interpolation of LOGITS
             const logit = bilinearSample(maskLogits, srcW, srcH, srcX, srcY);
 
             // Threshold at 0 (equivalent to sigmoid > 0.5)
-            // This matches: F.interpolate(masks, orig_hw, mode="bilinear", align_corners=False) > 0
             result[y][x] = logit > 0 ? 255 : 0;
         }
     }
 
-    return result;
+    return {
+        mask: result,
+        bounds: [dstMinX, dstMinY, dstMaxX, dstMaxY],
+    };
 }
 
 const builder: ComponentBuilder = ({ core }) => {
