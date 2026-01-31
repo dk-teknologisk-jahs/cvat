@@ -212,9 +212,15 @@ const sam3Plugin: SAM3Plugin = {
                                 plugin.data.emb1Cache.has(key) &&
                                 plugin.data.emb2Cache.has(key)
                             );
+                            console.log(`SAM3 enter: key=${key}, hasAllFeatures=${hasAllFeatures}, ` +
+                                `emb0=${plugin.data.emb0Cache.has(key)}, ` +
+                                `emb1=${plugin.data.emb1Cache.has(key)}, ` +
+                                `emb2=${plugin.data.emb2Cache.has(key)}`);
                             if (hasAllFeatures) {
+                                console.log('SAM3 enter: using cached embeddings, skipping server call');
                                 resolve({ preventMethodCall: true });
                             } else {
+                                console.log('SAM3 enter: fetching embeddings from server');
                                 resolve(null);
                             }
                         }
@@ -298,6 +304,7 @@ const sam3Plugin: SAM3Plugin = {
 
                                 // Process server response if we have new embeddings
                                 if (result) {
+                                    console.log('SAM3 leave: received new embeddings from server');
                                     // Decode base64 embeddings from server
                                     const decodeEmbedding = (base64: string, shape: number[]): Tensor => {
                                         const binaryStr = window.atob(base64);
@@ -321,6 +328,8 @@ const sam3Plugin: SAM3Plugin = {
                                         key,
                                         decodeEmbedding(result.image_embeddings_2, result.image_embeddings_2_shape),
                                     );
+                                } else {
+                                    console.log('SAM3 leave: using cached embeddings (no server result)');
                                 }
 
                                 const modelScale = getModelScale(imWidth, imHeight);
