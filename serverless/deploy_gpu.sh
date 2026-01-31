@@ -22,14 +22,14 @@ do
 
     if [ -n "$GPU_ID" ]; then
         # Deploy with specific GPU device
-        # Nuclio's local platform uses --gpus all when nvidia.com/gpu is set.
-        # We set NVIDIA_VISIBLE_DEVICES at runtime to restrict to specific GPU.
-        # This env var overrides any value set in the function config.
+        # Nuclio's local platform uses --gpus all when nvidia.com/gpu is set,
+        # which ignores NVIDIA_VISIBLE_DEVICES. However, CUDA_VISIBLE_DEVICES
+        # is read by PyTorch/CUDA at runtime and works regardless of Docker GPU mount.
         nuctl deploy --project-name cvat --path "$func_root" \
             --file "$func_config" --platform local \
             --env CVAT_FUNCTIONS_REDIS_HOST=cvat_redis_ondisk \
             --env CVAT_FUNCTIONS_REDIS_PORT=6666 \
-            --env NVIDIA_VISIBLE_DEVICES="$GPU_ID" \
+            --env CUDA_VISIBLE_DEVICES="$GPU_ID" \
             --platform-config '{"attributes": {"network": "cvat_cvat"}}'
     else
         nuctl deploy --project-name cvat --path "$func_root" \
