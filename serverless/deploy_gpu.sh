@@ -1,10 +1,13 @@
 #!/bin/bash
 # Sample commands to deploy nuclio functions on GPU
+# Usage: ./deploy_gpu.sh [functions_dir] [gpu_id]
+# Example: ./deploy_gpu.sh serverless/pytorch/facebookresearch/sam2 1
 
 set -eu
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 FUNCTIONS_DIR=${1:-$SCRIPT_DIR}
+GPU_ID=${2:-}
 
 nuctl create project cvat --platform local
 
@@ -16,11 +19,21 @@ do
     func_rel_path="$(realpath --relative-to="$SCRIPT_DIR" "$(dirname "$func_root")")"
 
     echo "Deploying $func_rel_path function..."
-    nuctl deploy --project-name cvat --path "$func_root" \
-        --file "$func_config" --platform local \
-        --env CVAT_FUNCTIONS_REDIS_HOST=cvat_redis_ondisk \
-        --env CVAT_FUNCTIONS_REDIS_PORT=6666 \
-        --platform-config '{"attributes": {"network": "cvat_cvat"}}'
+
+    if [ -n "$GPU_ID" ]; then
+        # Deploy with specific GPU device
+        nuctl deploy --project-name cvat --path "$func_root" \
+            --file "$func_config" --platform local \
+            --env CVAT_FUNCTIONS_REDIS_HOST=cvat_redis_ondisk \
+            --env CVAT_FUNCTIONS_REDIS_PORT=6666 \
+            --platform-config "{\"attributes\": {\"network\": \"cvat_cvat\", \"gpus\": \"device=${GPU_ID}\"}}"
+    else
+        nuctl deploy --project-name cvat --path "$func_root" \
+            --file "$func_config" --platform local \
+            --env CVAT_FUNCTIONS_REDIS_HOST=cvat_redis_ondisk \
+            --env CVAT_FUNCTIONS_REDIS_PORT=6666 \
+            --platform-config '{"attributes": {"network": "cvat_cvat"}}'
+    fi
 done
 
 nuctl get function --platform local
