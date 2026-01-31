@@ -73,15 +73,26 @@ if ((self as any).importScripts) {
             });
         } else if (e.data.action === WorkerAction.DECODE) {
             decoder.run((e.data.payload as DecodeBody)).then((results) => {
+                // Debug: log raw decoder output
+                const maskData = results.masks.data as Float32Array;
+                const maskDims = results.masks.dims;
+                const positiveCount = Array.from(maskData).filter((v) => v > 0).length;
+                const totalCount = maskData.length;
+                const xtl = Number(results.xtl.data[0]);
+                const ytl = Number(results.ytl.data[0]);
+                const xbr = Number(results.xbr.data[0]);
+                const ybr = Number(results.ybr.data[0]);
+                console.log(`SAM2 decoder raw output: dims=${JSON.stringify(maskDims)}, positive=${positiveCount}/${totalCount}, bounds=(${xtl.toFixed(3)},${ytl.toFixed(3)})-(${xbr.toFixed(3)},${ybr.toFixed(3)})`);
+
                 postMessage({
                     action: WorkerAction.DECODE,
                     payload: {
                         masks: results.masks,
                         lowResMasks: results.low_res_masks,
-                        xtl: Number(results.xtl.data[0]),
-                        ytl: Number(results.ytl.data[0]),
-                        xbr: Number(results.xbr.data[0]),
-                        ybr: Number(results.ybr.data[0]),
+                        xtl,
+                        ytl,
+                        xbr,
+                        ybr,
                     },
                 });
             }).catch((error: unknown) => {

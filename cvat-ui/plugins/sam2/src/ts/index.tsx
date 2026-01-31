@@ -320,7 +320,23 @@ const sam2Plugin: SAM2Plugin = {
                                         const {
                                             masks, lowResMasks, xtl, ytl, xbr, ybr,
                                         } = e.data.payload;
+
+                                        // Debug: log received data
+                                        console.log('SAM2 received from worker:', {
+                                            masksType: typeof masks?.data,
+                                            masksDims: masks?.dims,
+                                            masksDataLength: masks?.data?.length,
+                                            bounds: [xtl, ytl, xbr, ybr],
+                                        });
+
                                         const imageData = onnxToImage(masks.data, masks.dims[3], masks.dims[2]);
+
+                                        // Debug: log final imageData
+                                        const flatData = imageData.flat();
+                                        const positivePixels = flatData.filter((v: number) => v > 0).length;
+                                        console.log(`SAM2 final imageData: ${imageData[0]?.length}x${imageData.length}, positive=${positivePixels}/${flatData.length}`);
+                                        console.log(`SAM2 bounds: [${xtl}, ${ytl}, ${xbr}, ${ybr}]`);
+
                                         plugin.data.lowResMasks.set(key, lowResMasks);
                                         plugin.data.lastClicks = clicks;
 
