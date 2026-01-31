@@ -65,7 +65,7 @@ export interface DecodeBody {
 }
 
 export interface DecodeResult {
-    mask: Tensor;
+    maskData: Float32Array;  // Raw mask data (not Tensor - for proper postMessage serialization)
     maskH: number;
     maskW: number;
     iouScore: number;
@@ -74,7 +74,7 @@ export interface DecodeResult {
     ytl: number;
     xbr: number;
     ybr: number;
-    lowResMask?: Tensor;  // For mask refinement on next click
+    lowResMaskData?: Float32Array;  // Raw low-res mask data for mask refinement
 }
 
 export interface WorkerOutput {
@@ -136,8 +136,57 @@ if ((self as any).importScripts) {
                 error: 'Worker was not initialized',
             });
         } else if (e.data.action === WorkerAction.DECODE) {
-            const inputs = e.data.payload as DecodeBody;
-            const hasMaskFromCaller = inputs.has_mask_input && inputs.mask_input;
+            const rawInputs = e.data.payload as DecodeBody;
+            const hasMaskFromCaller = rawInputs.has_mask_input && rawInputs.mask_input;
+
+            // Reconstruct Tensors from serialized data (postMessage serializes Tensors as plain objects)
+            const reconstructTensor = (serialized: any, name: string): Tensor => {
+                // If it's already a proper Tensor, return it
+                if (serialized instanceof Tensor) {
+                    console.log(`  ${name}: already Tensor, dims=${serialized.dims}`);
+                    return serialized;
+                }
+                // Reconstruct from serialized data
+                const data = serialized.data;
+                const dims = serialized.dims as number[];
+                const type = serialized.type || 'float32';
+
+                // Convert data to proper TypedArray if needed
+                let typedData: Float32Array | BigInt64Array;
+                if (data instanceof Float32Array) {
+                    console.log(`  ${name}: data is Float32Array, length=${data.length}, dims=${dims}`);
+                    typedData = data;
+                } else if (data instanceof BigInt64Array) {
+                    console.log(`  ${name}: data is BigInt64Array, length=${data.length}, dims=${dims}`);
+                    typedData = data;
+                } else if (typeof data === 'object' && data !== null) {
+                    // Convert object-like representation to Float32Array
+                    console.log(`  ${name}: data is object, converting...`);
+                    const values = Object.values(data) as number[];
+                    console.log(`  ${name}: converted to array, length=${values.length}`);
+                    typedData = new Float32Array(values);
+                } else {
+                    throw new Error(`Cannot reconstruct Tensor ${name}: unknown data format (${typeof data})`);
+                }
+
+                return new Tensor(type as 'float32', typedData, dims);
+            };
+
+            console.log('SAM3 worker: reconstructing tensors...');
+
+            // Reconstruct all input tensors
+            const inputs = {
+                input_points: reconstructTensor(rawInputs.input_points, 'input_points'),
+                input_labels: reconstructTensor(rawInputs.input_labels, 'input_labels'),
+                input_boxes: reconstructTensor(rawInputs.input_boxes, 'input_boxes'),
+                'image_embeddings.0': reconstructTensor(rawInputs['image_embeddings.0'], 'image_embeddings.0'),
+                'image_embeddings.1': reconstructTensor(rawInputs['image_embeddings.1'], 'image_embeddings.1'),
+                'image_embeddings.2': reconstructTensor(rawInputs['image_embeddings.2'], 'image_embeddings.2'),
+                mask_input: rawInputs.mask_input ? reconstructTensor(rawInputs.mask_input, 'mask_input') : undefined,
+                has_mask_input: rawInputs.has_mask_input,
+            };
+
+            console.log('SAM3 worker: tensors reconstructed');
 
             // Prepare inputs based on decoder type
             let runInputs: Record<string, Tensor>;
@@ -229,12 +278,25 @@ if ((self as any).importScripts) {
                 };
             }
 
+            console.log('SAM3 worker: running decoder...');
+            console.log('  Input names:', Object.keys(runInputs));
+
             decoder.run(runInputs).then((results) => {
+                console.log('SAM3 worker: decoder returned');
+                console.log('  Output names:', Object.keys(results));
+
                 // Get outputs - handle both naming conventions
                 const iouScores = results.iou_scores || results.iou_predictions;
                 const predMasks = results.pred_masks || results.masks;
                 const objectScoreLogits = results.object_score_logits || null;
                 const lowResMasks = results.low_res_masks || null;  // For mask refinement
+
+                if (!iouScores || !predMasks) {
+                    throw new Error(`Missing outputs: iou_scores=${!!iouScores}, pred_masks=${!!predMasks}`);
+                }
+
+                console.log('  iou_scores dims:', iouScores.dims);
+                console.log('  pred_masks dims:', predMasks.dims);
 
                 // Find best mask (highest IoU score)
                 const iouData = iouScores.data as Float32Array;
@@ -246,6 +308,8 @@ if ((self as any).importScripts) {
                         bestIdx = i;
                     }
                 }
+
+                console.log('  Best mask index:', bestIdx, 'IoU:', bestIou);
 
                 // Get the best mask
                 // pred_masks shape: [1, 1, 3, H, W] or [1, 3, H, W]
@@ -281,6 +345,11 @@ if ((self as any).importScripts) {
                     bestMaskLogits[i] = maskData[maskOffset + i];
                 }
 
+                // Log mask logits stats
+                const logitsMin = Math.min(...bestMaskLogits);
+                const logitsMax = Math.max(...bestMaskLogits);
+                console.log(`  Mask logits: min=${logitsMin.toFixed(3)}, max=${logitsMax.toFixed(3)}`);
+
                 // Apply sigmoid and threshold to create binary mask
                 const mask = new Float32Array(maskSize);
                 for (let i = 0; i < maskSize; i++) {
@@ -292,9 +361,11 @@ if ((self as any).importScripts) {
 
                 // Calculate bounding box from mask
                 let xtl = maskW, ytl = maskH, xbr = 0, ybr = 0;
+                let hasPositivePixels = false;
                 for (let y = 0; y < maskH; y++) {
                     for (let x = 0; x < maskW; x++) {
                         if (mask[y * maskW + x] > 0) {
+                            hasPositivePixels = true;
                             xtl = Math.min(xtl, x);
                             ytl = Math.min(ytl, y);
                             xbr = Math.max(xbr, x);
@@ -303,31 +374,43 @@ if ((self as any).importScripts) {
                     }
                 }
 
+                const positiveCount = mask.filter((v) => v > 0).length;
+                console.log(`  Binary mask: ${positiveCount}/${maskSize} positive pixels (${(100*positiveCount/maskSize).toFixed(1)}%)`);
+                // If no positive pixels, set bounds to full mask
+                if (!hasPositivePixels) {
+                    xtl = 0;
+                    ytl = 0;
+                    xbr = maskW - 1;
+                    ybr = maskH - 1;
+                }
+
                 // Get object score (optional output)
                 const objScore = objectScoreLogits
                     ? 1.0 / (1.0 + Math.exp(-(objectScoreLogits.data as Float32Array)[0]))
                     : 1.0;  // Default to 1.0 if not available
 
-                // Extract low-res mask for the best prediction (for mask refinement)
-                let lowResMask: Tensor | undefined;
+                // Note: Low-res mask extraction moved to the postMessage block below
+
+                // Extract low-res mask data for mask refinement (if available)
+                let lowResMaskData: Float32Array | undefined;
                 if (lowResMasks && supportsMaskInput) {
-                    // low_res_masks shape: [1, 3, 288, 288]
-                    const lowResData = lowResMasks.data as Float32Array;
+                    // low_res_masks shape: [1, 3, 288, 288] or [1, 1, 3, 288, 288]
+                    const lowResFullData = lowResMasks.data as Float32Array;
                     const lowResH = 288;
                     const lowResW = 288;
                     const lowResMaskSize = lowResH * lowResW;
-                    const lowResMaskData = new Float32Array(lowResMaskSize);
+                    lowResMaskData = new Float32Array(lowResMaskSize);
                     const lowResOffset = bestIdx * lowResMaskSize;
                     for (let i = 0; i < lowResMaskSize; i++) {
-                        lowResMaskData[i] = lowResData[lowResOffset + i];
+                        lowResMaskData[i] = lowResFullData[lowResOffset + i];
                     }
-                    lowResMask = new Tensor('float32', lowResMaskData, [1, 1, lowResH, lowResW]);
                 }
 
+                // Send raw Float32Array data instead of Tensor (Tensors don't serialize properly via postMessage)
                 postMessage({
                     action: WorkerAction.DECODE,
                     payload: {
-                        mask: new Tensor('float32', mask, [1, 1, maskH, maskW]),
+                        maskData: mask,  // Raw Float32Array, not Tensor
                         maskH,
                         maskW,
                         iouScore: bestIou,
@@ -336,7 +419,7 @@ if ((self as any).importScripts) {
                         ytl: ytl / maskH,
                         xbr: xbr / maskW,
                         ybr: ybr / maskH,
-                        lowResMask,
+                        lowResMaskData,  // Raw Float32Array for mask refinement
                     } as DecodeResult,
                 });
             }).catch((error: unknown) => {

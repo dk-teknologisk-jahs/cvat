@@ -393,16 +393,42 @@ const sam3Plugin: SAM3Plugin = {
                                     }
 
                                     const {
-                                        mask, maskH, maskW, xtl, ytl, xbr, ybr, lowResMask,
+                                        maskData: rawMaskData, maskH, maskW, xtl, ytl, xbr, ybr, lowResMaskData,
                                     } = e.data.payload;
 
-                                    // Store low-res mask for future refinement (if available)
-                                    if (lowResMask && plugin.data.supportsMaskInput) {
-                                        plugin.data.lowResMaskCache.set(key, lowResMask);
+                                    // Ensure maskData is array-like (postMessage may serialize differently)
+                                    let maskData: ArrayLike<number>;
+                                    if (rawMaskData instanceof Float32Array) {
+                                        maskData = rawMaskData;
+                                    } else if (Array.isArray(rawMaskData)) {
+                                        maskData = rawMaskData;
+                                    } else if (typeof rawMaskData === 'object' && rawMaskData !== null) {
+                                        // Convert object-like {0: val, 1: val, ...} to array
+                                        maskData = Object.values(rawMaskData) as number[];
+                                    } else {
+                                        reject(new Error(`Invalid maskData type: ${typeof rawMaskData}`));
+                                        return;
                                     }
 
-                                    // Extract mask data from Tensor
-                                    const maskData = mask.data as Float32Array;
+                                    // Debug: log mask stats
+                                    const maskArray = Array.from(maskData);
+                                    const positivePixels = maskArray.filter((v) => v > 0).length;
+                                    console.log(`SAM3 decode result: maskH=${maskH}, maskW=${maskW}, ` +
+                                        `positivePixels=${positivePixels}/${maskArray.length}, ` +
+                                        `bounds=(${xtl.toFixed(3)},${ytl.toFixed(3)})-(${xbr.toFixed(3)},${ybr.toFixed(3)})`);
+
+                                    // Store low-res mask for future refinement (if available)
+                                    // Convert raw Float32Array back to Tensor for cache storage
+                                    if (lowResMaskData && plugin.data.supportsMaskInput) {
+                                        const lowResMaskTensor = new Tensor(
+                                            'float32',
+                                            new Float32Array(lowResMaskData),
+                                            [1, 1, 288, 288],
+                                        );
+                                        plugin.data.lowResMaskCache.set(key, lowResMaskTensor);
+                                    }
+
+                                    // maskData is already a Float32Array (or array-like from postMessage)
 
                                     // Resize mask from decoder resolution to image resolution
                                     const imageData = resizeMask(
@@ -484,7 +510,7 @@ const sam3Plugin: SAM3Plugin = {
  * Resize binary mask from decoder resolution to original image resolution.
  */
 function resizeMask(
-    maskData: Float32Array,
+    maskData: ArrayLike<number>,
     srcW: number,
     srcH: number,
     dstW: number,
