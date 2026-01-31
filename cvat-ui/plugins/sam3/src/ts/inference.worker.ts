@@ -369,12 +369,20 @@ if ((self as any).importScripts) {
 
                 const positiveCount = Array.from(bestMaskLogits).filter((v) => v > 0).length;
                 console.log(`  Mask logits: ${positiveCount}/${maskSize} above 0 (${(100*positiveCount/maskSize).toFixed(1)}%)`);
+                
                 // If no positive pixels, set bounds to full mask
                 if (!hasPositivePixels) {
                     xtl = 0;
                     ytl = 0;
                     xbr = maskW - 1;
                     ybr = maskH - 1;
+                } else {
+                    // Add 1 pixel padding to account for bilinear interpolation at edges
+                    // When upsampling, edge pixels can extend beyond the original bbox
+                    xtl = Math.max(0, xtl - 1);
+                    ytl = Math.max(0, ytl - 1);
+                    xbr = Math.min(maskW - 1, xbr + 1);
+                    ybr = Math.min(maskH - 1, ybr + 1);
                 }
 
                 // Get object score (optional output)
@@ -402,6 +410,10 @@ if ((self as any).importScripts) {
                 // Send mask LOGITS (NOT probabilities) for smooth upsampling on main thread
                 // Main thread will: bilinear interpolate logits -> threshold at 0
                 // This matches the reference Python implementation approach
+                //
+                // Normalize bounds to [0, 1] range:
+                // - xtl/ytl: left/top edge of first positive pixel
+                // - xbr/ybr: right/bottom edge of last positive pixel (hence +1)
                 postMessage({
                     action: WorkerAction.DECODE,
                     payload: {
@@ -410,10 +422,10 @@ if ((self as any).importScripts) {
                         maskW,
                         iouScore: bestIou,
                         objectScore: objScore,
-                        xtl: xtl / maskW,  // Normalized coordinates
-                        ytl: ytl / maskH,
-                        xbr: xbr / maskW,
-                        ybr: ybr / maskH,
+                        xtl: xtl / maskW,           // Left edge of first pixel
+                        ytl: ytl / maskH,           // Top edge of first pixel
+                        xbr: (xbr + 1) / maskW,     // Right edge of last pixel
+                        ybr: (ybr + 1) / maskH,     // Bottom edge of last pixel
                         lowResMaskData,  // Raw Float32Array for mask refinement
                     } as DecodeResult,
                 });

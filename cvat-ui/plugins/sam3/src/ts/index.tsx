@@ -431,15 +431,16 @@ const sam3Plugin: SAM3Plugin = {
                                     // maskData is already a Float32Array (or array-like from postMessage)
 
                                     // Convert normalized bounds to pixel coordinates
-                                    const pixelBounds: [number, number, number, number] = [
-                                        Math.round(xtl * imWidth),
-                                        Math.round(ytl * imHeight),
-                                        Math.round(xbr * imWidth),
-                                        Math.round(ybr * imHeight),
-                                    ];
+                                    // Bounds are edge-based: xtl/ytl are left/top edges, xbr/ybr are right/bottom edges
+                                    // Use floor for left/top, ceil-1 for right/bottom to get inclusive pixel indices
+                                    const left = Math.max(0, Math.floor(xtl * imWidth));
+                                    const top = Math.max(0, Math.floor(ytl * imHeight));
+                                    const right = Math.min(imWidth - 1, Math.ceil(xbr * imWidth) - 1);
+                                    const bottom = Math.min(imHeight - 1, Math.ceil(ybr * imHeight) - 1);
+                                    
+                                    const pixelBounds: [number, number, number, number] = [left, top, right, bottom];
 
                                     // Ensure bounds are valid
-                                    const [left, top, right, bottom] = pixelBounds;
                                     const cropW = right - left + 1;
                                     const cropH = bottom - top + 1;
 
