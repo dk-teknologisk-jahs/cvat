@@ -350,21 +350,19 @@ if ((self as any).importScripts) {
                 const logitsMax = Math.max(...bestMaskLogits);
                 console.log(`  Mask logits: min=${logitsMin.toFixed(3)}, max=${logitsMax.toFixed(3)}`);
 
-                // Apply sigmoid and threshold to create binary mask
-                const mask = new Float32Array(maskSize);
+                // Apply sigmoid to get probabilities (NOT thresholding yet - that happens after upsampling)
+                const maskProbs = new Float32Array(maskSize);
                 for (let i = 0; i < maskSize; i++) {
-                    // Sigmoid
                     const v = bestMaskLogits[i];
-                    const prob = 1.0 / (1.0 + Math.exp(-Math.max(-50, Math.min(50, v))));
-                    mask[i] = prob > 0.5 ? 1 : 0;
+                    maskProbs[i] = 1.0 / (1.0 + Math.exp(-Math.max(-50, Math.min(50, v))));
                 }
 
-                // Calculate bounding box from mask
+                // Calculate bounding box from probabilities (use 0.5 threshold for bounds)
                 let xtl = maskW, ytl = maskH, xbr = 0, ybr = 0;
                 let hasPositivePixels = false;
                 for (let y = 0; y < maskH; y++) {
                     for (let x = 0; x < maskW; x++) {
-                        if (mask[y * maskW + x] > 0) {
+                        if (maskProbs[y * maskW + x] > 0.5) {
                             hasPositivePixels = true;
                             xtl = Math.min(xtl, x);
                             ytl = Math.min(ytl, y);
@@ -374,8 +372,8 @@ if ((self as any).importScripts) {
                     }
                 }
 
-                const positiveCount = mask.filter((v) => v > 0).length;
-                console.log(`  Binary mask: ${positiveCount}/${maskSize} positive pixels (${(100*positiveCount/maskSize).toFixed(1)}%)`);
+                const positiveCount = Array.from(maskProbs).filter((v) => v > 0.5).length;
+                console.log(`  Mask probs: ${positiveCount}/${maskSize} above 0.5 (${(100*positiveCount/maskSize).toFixed(1)}%)`);
                 // If no positive pixels, set bounds to full mask
                 if (!hasPositivePixels) {
                     xtl = 0;
@@ -406,11 +404,12 @@ if ((self as any).importScripts) {
                     }
                 }
 
-                // Send raw Float32Array data instead of Tensor (Tensors don't serialize properly via postMessage)
+                // Send mask probabilities (NOT binary) for smooth upsampling on main thread
+                // Thresholding will happen AFTER bilinear interpolation for smooth edges
                 postMessage({
                     action: WorkerAction.DECODE,
                     payload: {
-                        maskData: mask,  // Raw Float32Array, not Tensor
+                        maskData: maskProbs,  // Probabilities [0,1], not binary
                         maskH,
                         maskW,
                         iouScore: bestIou,

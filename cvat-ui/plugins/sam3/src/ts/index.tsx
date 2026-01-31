@@ -443,9 +443,9 @@ const sam3Plugin: SAM3Plugin = {
                                     const cropW = right - left + 1;
                                     const cropH = bottom - top + 1;
 
-                                    // Resize mask from decoder resolution directly to the crop region
-                                    // This produces a cropped mask like SAM2 does
-                                    const croppedMask = resizeMaskToCrop(
+                                    // Resize mask probabilities using bilinear interpolation, then threshold
+                                    // This produces smooth edges (like usls does)
+                                    const croppedMask = resizeMaskToCropBilinear(
                                         maskData,
                                         maskW,
                                         maskH,
@@ -526,11 +526,44 @@ const sam3Plugin: SAM3Plugin = {
 };
 
 /**
- * Resize binary mask from decoder resolution directly to a cropped region of the target image.
- * This produces a cropped mask (like SAM2) instead of a full-image mask.
+ * Bilinear interpolation for a single point in the source mask.
+ * Returns interpolated probability value.
  */
-function resizeMaskToCrop(
+function bilinearSample(
     maskData: ArrayLike<number>,
+    srcW: number,
+    srcH: number,
+    x: number,
+    y: number,
+): number {
+    // Clamp coordinates
+    const x0 = Math.max(0, Math.min(Math.floor(x), srcW - 1));
+    const y0 = Math.max(0, Math.min(Math.floor(y), srcH - 1));
+    const x1 = Math.min(x0 + 1, srcW - 1);
+    const y1 = Math.min(y0 + 1, srcH - 1);
+
+    // Fractional parts
+    const xFrac = x - x0;
+    const yFrac = y - y0;
+
+    // Sample the 4 corners
+    const v00 = maskData[y0 * srcW + x0];
+    const v10 = maskData[y0 * srcW + x1];
+    const v01 = maskData[y1 * srcW + x0];
+    const v11 = maskData[y1 * srcW + x1];
+
+    // Bilinear interpolation
+    const v0 = v00 * (1 - xFrac) + v10 * xFrac;
+    const v1 = v01 * (1 - xFrac) + v11 * xFrac;
+    return v0 * (1 - yFrac) + v1 * yFrac;
+}
+
+/**
+ * Resize mask probabilities from decoder resolution to a cropped region using bilinear interpolation.
+ * Thresholds AFTER interpolation for smooth edges (like usls does).
+ */
+function resizeMaskToCropBilinear(
+    maskProbs: ArrayLike<number>,
     srcW: number,
     srcH: number,
     imageW: number,
@@ -548,12 +581,15 @@ function resizeMaskToCrop(
             const imgX = cropLeft + x;
             const imgY = cropTop + y;
 
-            // Map image coords to source (decoder) coords
-            const srcX = Math.floor((imgX / imageW) * srcW);
-            const srcY = Math.floor((imgY / imageH) * srcH);
-            const srcIdx = srcY * srcW + srcX;
+            // Map image coords to source (decoder) coords - use floating point for interpolation
+            const srcX = (imgX / imageW) * srcW;
+            const srcY = (imgY / imageH) * srcH;
 
-            result[y][x] = maskData[srcIdx] > 0 ? 255 : 0;
+            // Bilinear interpolation of probability
+            const prob = bilinearSample(maskProbs, srcW, srcH, srcX, srcY);
+
+            // Threshold AFTER interpolation for smooth edges
+            result[y][x] = prob > 0.5 ? 255 : 0;
         }
     }
 
