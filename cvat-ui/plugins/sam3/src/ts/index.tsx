@@ -447,12 +447,21 @@ const sam3Plugin: SAM3Plugin = {
                                         Math.round(ybr * imHeight),
                                     ];
 
+                                    // Debug: log final result
+                                    const resizedPositive = imageData.flat().filter((v) => v > 0).length;
+                                    console.log(`SAM3 final result: image=${imWidth}x${imHeight}, ` +
+                                        `maskShape=${imageData.length}x${imageData[0]?.length || 0}, ` +
+                                        `positivePixels=${resizedPositive}, ` +
+                                        `bounds=[${bounds.join(',')}]`);
+
                                     plugin.data.lastClicks = clicks;
 
-                                    resolve({
+                                    const result = {
                                         mask: imageData,
                                         bounds,
-                                    });
+                                    };
+                                    console.log('SAM3 resolving with:', result);
+                                    resolve(result);
                                 };
 
                                 plugin.data.worker.onerror = (error) => {
