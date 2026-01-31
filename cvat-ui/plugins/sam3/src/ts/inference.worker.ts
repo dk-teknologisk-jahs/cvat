@@ -298,50 +298,75 @@ if ((self as any).importScripts) {
                 console.log('  iou_scores dims:', iouScores.dims);
                 console.log('  pred_masks dims:', predMasks.dims);
 
-                // Find best mask (highest IoU score)
-                const iouData = iouScores.data as Float32Array;
-                let bestIdx = 0;
-                let bestIou = iouData[0];
-                for (let i = 1; i < iouData.length; i++) {
-                    if (iouData[i] > bestIou) {
-                        bestIou = iouData[i];
-                        bestIdx = i;
-                    }
-                }
-
-                console.log('  Best mask index:', bestIdx, 'IoU:', bestIou);
-
-                // Get the best mask
+                // Parse mask tensor shape
                 // pred_masks shape: [1, 1, 3, H, W] or [1, 3, H, W]
                 const maskDims = predMasks.dims;
                 let maskH: number;
                 let maskW: number;
                 let numMasks: number;
-                let maskOffset: number;
 
-                // Handle different possible tensor shapes
                 if (maskDims.length === 5) {
                     // Shape: [1, 1, 3, H, W]
                     numMasks = maskDims[2] as number;
                     maskH = maskDims[3] as number;
                     maskW = maskDims[4] as number;
-                    maskOffset = bestIdx * maskH * maskW;
                 } else if (maskDims.length === 4) {
                     // Shape: [1, 3, H, W]
                     numMasks = maskDims[1] as number;
                     maskH = maskDims[2] as number;
                     maskW = maskDims[3] as number;
-                    maskOffset = bestIdx * maskH * maskW;
                 } else {
                     throw new Error(`Unexpected mask tensor shape: ${maskDims}`);
                 }
 
                 const maskData = predMasks.data as Float32Array;
+                const maskSize = maskH * maskW;
+                const iouData = iouScores.data as Float32Array;
+
+                // Stability-aware mask selection (matching SAM3's dynamic_multimask_via_stability)
+                // Stability score measures how "confident" the mask boundaries are.
+                // Formula: stability = count(logits > delta) / count(logits > -delta)
+                // Higher stability = sharper, more confident boundaries
+                const STABILITY_DELTA = 0.05;  // SAM3 default: dynamic_multimask_stability_delta
+                const STABILITY_WEIGHT = 0.5;  // How much to weight stability vs IoU
+
+                let bestIdx = 0;
+                let bestScore = -Infinity;
+
+                console.log('  Mask selection with stability:');
+                for (let i = 0; i < numMasks; i++) {
+                    const maskOffset = i * maskSize;
+
+                    // Compute stability score for this mask
+                    let areaInner = 0;  // Confident foreground (logits > delta)
+                    let areaUnion = 0;  // Not confident background (logits > -delta)
+
+                    for (let j = 0; j < maskSize; j++) {
+                        const logit = maskData[maskOffset + j];
+                        if (logit > STABILITY_DELTA) areaInner++;
+                        if (logit > -STABILITY_DELTA) areaUnion++;
+                    }
+
+                    const stability = areaUnion > 0 ? areaInner / areaUnion : 1.0;
+                    const iou = iouData[i];
+
+                    // Combined score: weight IoU and stability
+                    // SAM3 uses stability as a threshold, but weighting works better for selection
+                    const combinedScore = iou * (1 - STABILITY_WEIGHT) + stability * STABILITY_WEIGHT;
+
+                    console.log(`    Mask ${i}: IoU=${iou.toFixed(3)}, stability=${stability.toFixed(3)}, ` +
+                        `combined=${combinedScore.toFixed(3)}`);
+
+                    if (combinedScore > bestScore) {
+                        bestScore = combinedScore;
+                        bestIdx = i;
+                    }
+                }
+
+                console.log(`  Selected mask ${bestIdx} (combined score: ${bestScore.toFixed(3)})`);
 
                 // Extract the best mask as LOGITS (not probabilities!)
-                // Key insight from reference implementations: resize logits, then threshold
-                // This produces smoother edges than sigmoid -> resize -> threshold
-                const maskSize = maskH * maskW;
+                const maskOffset = bestIdx * maskSize;
                 const bestMaskLogits = new Float32Array(maskSize);
                 for (let i = 0; i < maskSize; i++) {
                     bestMaskLogits[i] = maskData[maskOffset + i];
@@ -393,7 +418,7 @@ if ((self as any).importScripts) {
                         maskData: bestMaskLogits,  // LOGITS, not probabilities - threshold at 0 after resize
                         maskH,
                         maskW,
-                        iouScore: bestIou,
+                        iouScore: iouData[bestIdx],  // IoU score of selected mask
                         objectScore: objScore,
                         // Full image bounds (normalized) - no cropping
                         xtl: 0,
