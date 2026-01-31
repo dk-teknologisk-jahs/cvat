@@ -22,11 +22,24 @@ do
 
     if [ -n "$GPU_ID" ]; then
         # Deploy with specific GPU device
+        # Nuclio's local platform doesn't support device selection via platform-config,
+        # so we create a modified config that:
+        # 1. Removes nvidia.com/gpu resource (which causes --gpus all)
+        # 2. Sets NVIDIA_VISIBLE_DEVICES to specific GPU
+        TEMP_CONFIG=$(mktemp)
+        # Remove the nvidia.com/gpu resource limit and update NVIDIA_VISIBLE_DEVICES
+        sed -e '/nvidia.com\/gpu/d' \
+            -e "s/NVIDIA_VISIBLE_DEVICES=all/NVIDIA_VISIBLE_DEVICES=${GPU_ID}/" \
+            "$func_config" > "$TEMP_CONFIG"
+
         nuctl deploy --project-name cvat --path "$func_root" \
-            --file "$func_config" --platform local \
+            --file "$TEMP_CONFIG" --platform local \
             --env CVAT_FUNCTIONS_REDIS_HOST=cvat_redis_ondisk \
             --env CVAT_FUNCTIONS_REDIS_PORT=6666 \
+            --env NVIDIA_VISIBLE_DEVICES="$GPU_ID" \
             --platform-config "{\"attributes\": {\"network\": \"cvat_cvat\", \"gpus\": \"device=${GPU_ID}\"}}"
+
+        rm -f "$TEMP_CONFIG"
     else
         nuctl deploy --project-name cvat --path "$func_root" \
             --file "$func_config" --platform local \
