@@ -443,9 +443,10 @@ const sam3Plugin: SAM3Plugin = {
                                     const cropW = right - left + 1;
                                     const cropH = bottom - top + 1;
 
-                                    // Resize mask probabilities using bilinear interpolation, then threshold
-                                    // This produces smooth edges (like usls does)
-                                    const croppedMask = resizeMaskToCropBilinear(
+                                    // Resize mask probabilities using bicubic interpolation, then threshold
+                                    // Bicubic is better than bilinear for large upscaling factors
+                                    // (we're upscaling ~14x11 mask pixels to ~148x155 target)
+                                    const croppedMask = resizeMaskToCropBicubic(
                                         maskData,
                                         maskW,
                                         maskH,
@@ -526,43 +527,62 @@ const sam3Plugin: SAM3Plugin = {
 };
 
 /**
- * Bilinear interpolation for a single point in the source mask.
- * Returns interpolated probability value.
+ * Cubic interpolation helper (Catmull-Rom spline).
  */
-function bilinearSample(
+function cubicInterpolate(p0: number, p1: number, p2: number, p3: number, t: number): number {
+    const a = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3;
+    const b = p0 - 2.5 * p1 + 2 * p2 - 0.5 * p3;
+    const c = -0.5 * p0 + 0.5 * p2;
+    const d = p1;
+    return a * t * t * t + b * t * t + c * t + d;
+}
+
+/**
+ * Sample a value from the mask with clamped coordinates.
+ */
+function sampleMask(maskData: ArrayLike<number>, srcW: number, srcH: number, x: number, y: number): number {
+    const cx = Math.max(0, Math.min(x, srcW - 1));
+    const cy = Math.max(0, Math.min(y, srcH - 1));
+    return maskData[cy * srcW + cx];
+}
+
+/**
+ * Bicubic interpolation for a single point in the source mask.
+ * Uses Catmull-Rom spline for smoother results than bilinear, especially for large upscaling.
+ */
+function bicubicSample(
     maskData: ArrayLike<number>,
     srcW: number,
     srcH: number,
     x: number,
     y: number,
 ): number {
-    // Clamp coordinates
-    const x0 = Math.max(0, Math.min(Math.floor(x), srcW - 1));
-    const y0 = Math.max(0, Math.min(Math.floor(y), srcH - 1));
-    const x1 = Math.min(x0 + 1, srcW - 1);
-    const y1 = Math.min(y0 + 1, srcH - 1);
-
-    // Fractional parts
+    const x0 = Math.floor(x);
+    const y0 = Math.floor(y);
     const xFrac = x - x0;
     const yFrac = y - y0;
 
-    // Sample the 4 corners
-    const v00 = maskData[y0 * srcW + x0];
-    const v10 = maskData[y0 * srcW + x1];
-    const v01 = maskData[y1 * srcW + x0];
-    const v11 = maskData[y1 * srcW + x1];
+    // Sample 4x4 neighborhood
+    const cols: number[] = [];
+    for (let j = -1; j <= 2; j++) {
+        const row: number[] = [];
+        for (let i = -1; i <= 2; i++) {
+            row.push(sampleMask(maskData, srcW, srcH, x0 + i, y0 + j));
+        }
+        cols.push(cubicInterpolate(row[0], row[1], row[2], row[3], xFrac));
+    }
 
-    // Bilinear interpolation
-    const v0 = v00 * (1 - xFrac) + v10 * xFrac;
-    const v1 = v01 * (1 - xFrac) + v11 * xFrac;
-    return v0 * (1 - yFrac) + v1 * yFrac;
+    // Clamp result to [0, 1]
+    const result = cubicInterpolate(cols[0], cols[1], cols[2], cols[3], yFrac);
+    return Math.max(0, Math.min(1, result));
 }
 
 /**
- * Resize mask probabilities from decoder resolution to a cropped region using bilinear interpolation.
- * Thresholds AFTER interpolation for smooth edges (like usls does).
+ * Resize mask probabilities from decoder resolution to a cropped region using bicubic interpolation.
+ * Bicubic produces smoother results than bilinear, especially for large upscaling factors.
+ * Thresholds AFTER interpolation for smooth edges.
  */
-function resizeMaskToCropBilinear(
+function resizeMaskToCropBicubic(
     maskProbs: ArrayLike<number>,
     srcW: number,
     srcH: number,
@@ -581,12 +601,12 @@ function resizeMaskToCropBilinear(
             const imgX = cropLeft + x;
             const imgY = cropTop + y;
 
-            // Map image coords to source (decoder) coords - use floating point for interpolation
+            // Map image coords to source (decoder) coords
             const srcX = (imgX / imageW) * srcW;
             const srcY = (imgY / imageH) * srcH;
 
-            // Bilinear interpolation of probability
-            const prob = bilinearSample(maskProbs, srcW, srcH, srcX, srcY);
+            // Bicubic interpolation of probability
+            const prob = bicubicSample(maskProbs, srcW, srcH, srcX, srcY);
 
             // Threshold AFTER interpolation for smooth edges
             result[y][x] = prob > 0.5 ? 255 : 0;
