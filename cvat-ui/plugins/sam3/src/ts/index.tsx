@@ -81,8 +81,6 @@ interface ClickType {
 
 // SAM3 uses 1008x1008 input resolution
 const SAM3_IMAGE_SIZE = 1008;
-// Decoder output mask size (from usls: 288x288 for the feature map)
-const SAM3_MASK_SIZE = 256;
 
 function getModelScale(w: number, h: number) {
     const scaleX = SAM3_IMAGE_SIZE / w;
