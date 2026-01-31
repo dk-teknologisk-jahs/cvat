@@ -350,40 +350,14 @@ if ((self as any).importScripts) {
                 // Log mask logits stats
                 const logitsMin = Math.min(...bestMaskLogits);
                 const logitsMax = Math.max(...bestMaskLogits);
-                console.log(`  Mask logits: min=${logitsMin.toFixed(3)}, max=${logitsMax.toFixed(3)}`);
-
-                // Calculate bounding box from logits (threshold at 0, equivalent to sigmoid > 0.5)
-                let xtl = maskW, ytl = maskH, xbr = 0, ybr = 0;
-                let hasPositivePixels = false;
-                for (let y = 0; y < maskH; y++) {
-                    for (let x = 0; x < maskW; x++) {
-                        if (bestMaskLogits[y * maskW + x] > 0) {
-                            hasPositivePixels = true;
-                            xtl = Math.min(xtl, x);
-                            ytl = Math.min(ytl, y);
-                            xbr = Math.max(xbr, x);
-                            ybr = Math.max(ybr, y);
-                        }
-                    }
-                }
-
                 const positiveCount = Array.from(bestMaskLogits).filter((v) => v > 0).length;
-                console.log(`  Mask logits: ${positiveCount}/${maskSize} above 0 (${(100*positiveCount/maskSize).toFixed(1)}%)`);
-                
-                // If no positive pixels, set bounds to full mask
-                if (!hasPositivePixels) {
-                    xtl = 0;
-                    ytl = 0;
-                    xbr = maskW - 1;
-                    ybr = maskH - 1;
-                } else {
-                    // Add 1 pixel padding to account for bilinear interpolation at edges
-                    // When upsampling, edge pixels can extend beyond the original bbox
-                    xtl = Math.max(0, xtl - 1);
-                    ytl = Math.max(0, ytl - 1);
-                    xbr = Math.min(maskW - 1, xbr + 1);
-                    ybr = Math.min(maskH - 1, ybr + 1);
-                }
+                console.log(`  Mask logits: min=${logitsMin.toFixed(3)}, max=${logitsMax.toFixed(3)}, ` +
+                    `positive=${positiveCount}/${maskSize} (${(100*positiveCount/maskSize).toFixed(1)}%)`);
+
+                // Following official SAM3 and usls implementations:
+                // Return the FULL mask (no bounding box cropping)
+                // Main thread will resize to full image dimensions
+                // This approach gives smoother edges than cropping from low-res mask
 
                 // Get object score (optional output)
                 const objScore = objectScoreLogits
@@ -411,9 +385,8 @@ if ((self as any).importScripts) {
                 // Main thread will: bilinear interpolate logits -> threshold at 0
                 // This matches the reference Python implementation approach
                 //
-                // Normalize bounds to [0, 1] range:
-                // - xtl/ytl: left/top edge of first positive pixel
-                // - xbr/ybr: right/bottom edge of last positive pixel (hence +1)
+                // Following official SAM3 and usls: return full mask, no bounding box
+                // The full 288x288 mask will be resized to full image dimensions
                 postMessage({
                     action: WorkerAction.DECODE,
                     payload: {
@@ -422,10 +395,11 @@ if ((self as any).importScripts) {
                         maskW,
                         iouScore: bestIou,
                         objectScore: objScore,
-                        xtl: xtl / maskW,           // Left edge of first pixel
-                        ytl: ytl / maskH,           // Top edge of first pixel
-                        xbr: (xbr + 1) / maskW,     // Right edge of last pixel
-                        ybr: (ybr + 1) / maskH,     // Bottom edge of last pixel
+                        // Full image bounds (normalized) - no cropping
+                        xtl: 0,
+                        ytl: 0,
+                        xbr: 1,
+                        ybr: 1,
                         lowResMaskData,  // Raw Float32Array for mask refinement
                     } as DecodeResult,
                 });

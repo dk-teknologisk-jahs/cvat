@@ -393,7 +393,7 @@ const sam3Plugin: SAM3Plugin = {
                                     }
 
                                     const {
-                                        maskData: rawMaskData, maskH, maskW, xtl, ytl, xbr, ybr, lowResMaskData,
+                                        maskData: rawMaskData, maskH, maskW, lowResMaskData,
                                     } = e.data.payload;
 
                                     // Ensure maskData is array-like (postMessage may serialize differently)
@@ -414,8 +414,7 @@ const sam3Plugin: SAM3Plugin = {
                                     const maskArray = Array.from(maskData);
                                     const positivePixels = maskArray.filter((v) => v > 0).length;
                                     console.log(`SAM3 decode result: maskH=${maskH}, maskW=${maskW}, ` +
-                                        `positivePixels=${positivePixels}/${maskArray.length}, ` +
-                                        `bounds=(${xtl.toFixed(3)},${ytl.toFixed(3)})-(${xbr.toFixed(3)},${ybr.toFixed(3)})`);
+                                        `positivePixels=${positivePixels}/${maskArray.length}`);
 
                                     // Store low-res mask for future refinement (if available)
                                     // Convert raw Float32Array back to Tensor for cache storage
@@ -428,49 +427,32 @@ const sam3Plugin: SAM3Plugin = {
                                         plugin.data.lowResMaskCache.set(key, lowResMaskTensor);
                                     }
 
-                                    // maskData is already a Float32Array (or array-like from postMessage)
-
-                                    // Convert normalized bounds to pixel coordinates
-                                    // Bounds are edge-based: xtl/ytl are left/top edges, xbr/ybr are right/bottom edges
-                                    // Use floor for left/top, ceil-1 for right/bottom to get inclusive pixel indices
-                                    const left = Math.max(0, Math.floor(xtl * imWidth));
-                                    const top = Math.max(0, Math.floor(ytl * imHeight));
-                                    const right = Math.min(imWidth - 1, Math.ceil(xbr * imWidth) - 1);
-                                    const bottom = Math.min(imHeight - 1, Math.ceil(ybr * imHeight) - 1);
-                                    
-                                    const pixelBounds: [number, number, number, number] = [left, top, right, bottom];
-
-                                    // Ensure bounds are valid
-                                    const cropW = right - left + 1;
-                                    const cropH = bottom - top + 1;
-
-                                    // Two-step approach (like usls):
-                                    // 1. Resize full 288x288 mask to full image size with bicubic
-                                    // 2. Crop the result to the bounding box region
-                                    // This gives smooth edges because we interpolate at high res
-                                    const croppedMask = resizeMaskFullThenCrop(
+                                    // Following official SAM3 and usls implementations:
+                                    // Resize full mask to full image size (no bounding box cropping)
+                                    // This gives smoother edges because we interpolate at high resolution
+                                    const fullMask = resizeMaskToFullImage(
                                         maskData,
                                         maskW,
                                         maskH,
                                         imWidth,
                                         imHeight,
-                                        left,
-                                        top,
-                                        cropW,
-                                        cropH,
                                     );
 
+                                    // Bounds cover the full image
+                                    const pixelBounds: [number, number, number, number] = [
+                                        0, 0, imWidth - 1, imHeight - 1,
+                                    ];
+
                                     // Debug: log final result
-                                    const croppedPositive = croppedMask.flat().filter((v) => v > 0).length;
+                                    const finalPositive = fullMask.flat().filter((v) => v > 0).length;
                                     console.log(`SAM3 final result: image=${imWidth}x${imHeight}, ` +
-                                        `croppedMask=${croppedMask[0]?.length || 0}x${croppedMask.length}, ` +
-                                        `positivePixels=${croppedPositive}/${cropW * cropH}, ` +
-                                        `bounds=[${pixelBounds.join(',')}]`);
+                                        `fullMask=${fullMask[0]?.length || 0}x${fullMask.length}, ` +
+                                        `positivePixels=${finalPositive}/${imWidth * imHeight}`);
 
                                     plugin.data.lastClicks = clicks;
 
                                     const result = {
-                                        mask: croppedMask,
+                                        mask: fullMask,
                                         bounds: pixelBounds,
                                     };
                                     console.log('SAM3 resolving with:', result);
@@ -582,35 +564,30 @@ function bilinearSample(
  *
  * SAM2's decoder has upsampling built-in and outputs at target resolution,
  * while SAM3's decoder outputs fixed 288x288 requiring external upsampling.
+ *
+ * Following official SAM3 and usls implementations, we resize the full mask
+ * to the full image dimensions (no bounding box cropping).
  */
-function resizeMaskFullThenCrop(
+function resizeMaskToFullImage(
     maskLogits: ArrayLike<number>,  // LOGITS, not probabilities - threshold at 0
     srcW: number,
     srcH: number,
-    imageW: number,
-    imageH: number,
-    cropLeft: number,
-    cropTop: number,
-    cropW: number,
-    cropH: number,
+    dstW: number,
+    dstH: number,
 ): number[][] {
-    const result: number[][] = Array(cropH).fill(0).map(() => Array(cropW).fill(0));
+    const result: number[][] = Array(dstH).fill(0).map(() => Array(dstW).fill(0));
 
     // Precompute scale factors for align_corners=False mapping
-    const scaleX = srcW / imageW;
-    const scaleY = srcH / imageH;
+    const scaleX = srcW / dstW;
+    const scaleY = srcH / dstH;
 
-    for (let y = 0; y < cropH; y++) {
-        for (let x = 0; x < cropW; x++) {
-            // Map crop coords to full image coords
-            const imgX = cropLeft + x;
-            const imgY = cropTop + y;
-
-            // Map full image coords to source mask coords using align_corners=False
+    for (let y = 0; y < dstH; y++) {
+        for (let x = 0; x < dstW; x++) {
+            // Map destination coords to source mask coords using align_corners=False
             // Formula: src = (dst + 0.5) * scale - 0.5
             // This treats pixels as having area and maps centers to centers
-            const srcX = (imgX + 0.5) * scaleX - 0.5;
-            const srcY = (imgY + 0.5) * scaleY - 0.5;
+            const srcX = (x + 0.5) * scaleX - 0.5;
+            const srcY = (y + 0.5) * scaleY - 0.5;
 
             // Bilinear interpolation of LOGITS (matching PyTorch F.interpolate)
             const logit = bilinearSample(maskLogits, srcW, srcH, srcX, srcY);
