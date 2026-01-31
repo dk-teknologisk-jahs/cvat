@@ -430,35 +430,45 @@ const sam3Plugin: SAM3Plugin = {
 
                                     // maskData is already a Float32Array (or array-like from postMessage)
 
-                                    // Resize mask from decoder resolution to image resolution
-                                    const imageData = resizeMask(
-                                        maskData,
-                                        maskW,
-                                        maskH,
-                                        imWidth,
-                                        imHeight,
-                                    );
-
                                     // Convert normalized bounds to pixel coordinates
-                                    const bounds: [number, number, number, number] = [
+                                    const pixelBounds: [number, number, number, number] = [
                                         Math.round(xtl * imWidth),
                                         Math.round(ytl * imHeight),
                                         Math.round(xbr * imWidth),
                                         Math.round(ybr * imHeight),
                                     ];
 
+                                    // Ensure bounds are valid
+                                    const [left, top, right, bottom] = pixelBounds;
+                                    const cropW = right - left + 1;
+                                    const cropH = bottom - top + 1;
+
+                                    // Resize mask from decoder resolution directly to the crop region
+                                    // This produces a cropped mask like SAM2 does
+                                    const croppedMask = resizeMaskToCrop(
+                                        maskData,
+                                        maskW,
+                                        maskH,
+                                        imWidth,
+                                        imHeight,
+                                        left,
+                                        top,
+                                        cropW,
+                                        cropH,
+                                    );
+
                                     // Debug: log final result
-                                    const resizedPositive = imageData.flat().filter((v) => v > 0).length;
+                                    const croppedPositive = croppedMask.flat().filter((v) => v > 0).length;
                                     console.log(`SAM3 final result: image=${imWidth}x${imHeight}, ` +
-                                        `maskShape=${imageData.length}x${imageData[0]?.length || 0}, ` +
-                                        `positivePixels=${resizedPositive}, ` +
-                                        `bounds=[${bounds.join(',')}]`);
+                                        `croppedMask=${croppedMask[0]?.length || 0}x${croppedMask.length}, ` +
+                                        `positivePixels=${croppedPositive}/${cropW * cropH}, ` +
+                                        `bounds=[${pixelBounds.join(',')}]`);
 
                                     plugin.data.lastClicks = clicks;
 
                                     const result = {
-                                        mask: imageData,
-                                        bounds,
+                                        mask: croppedMask,
+                                        bounds: pixelBounds,
                                     };
                                     console.log('SAM3 resolving with:', result);
                                     resolve(result);
@@ -516,22 +526,31 @@ const sam3Plugin: SAM3Plugin = {
 };
 
 /**
- * Resize binary mask from decoder resolution to original image resolution.
+ * Resize binary mask from decoder resolution directly to a cropped region of the target image.
+ * This produces a cropped mask (like SAM2) instead of a full-image mask.
  */
-function resizeMask(
+function resizeMaskToCrop(
     maskData: ArrayLike<number>,
     srcW: number,
     srcH: number,
-    dstW: number,
-    dstH: number,
+    imageW: number,
+    imageH: number,
+    cropLeft: number,
+    cropTop: number,
+    cropW: number,
+    cropH: number,
 ): number[][] {
-    const result: number[][] = Array(dstH).fill(0).map(() => Array(dstW).fill(0));
+    const result: number[][] = Array(cropH).fill(0).map(() => Array(cropW).fill(0));
 
-    for (let y = 0; y < dstH; y++) {
-        for (let x = 0; x < dstW; x++) {
-            // Map destination coords to source coords (nearest neighbor)
-            const srcX = Math.floor((x / dstW) * srcW);
-            const srcY = Math.floor((y / dstH) * srcH);
+    for (let y = 0; y < cropH; y++) {
+        for (let x = 0; x < cropW; x++) {
+            // Map crop coords to image coords
+            const imgX = cropLeft + x;
+            const imgY = cropTop + y;
+
+            // Map image coords to source (decoder) coords
+            const srcX = Math.floor((imgX / imageW) * srcW);
+            const srcY = Math.floor((imgY / imageH) * srcH);
             const srcIdx = srcY * srcW + srcX;
 
             result[y][x] = maskData[srcIdx] > 0 ? 255 : 0;
