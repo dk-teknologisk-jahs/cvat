@@ -529,7 +529,8 @@ const sam3Plugin: SAM3Plugin = {
 
 /**
  * Bilinear interpolation for a single point in the source mask.
- * Returns interpolated probability value.
+ * Handles out-of-bounds coordinates by clamping to edge values.
+ * This matches PyTorch's grid_sample with padding_mode='border'.
  */
 function bilinearSample(
     maskData: ArrayLike<number>,
@@ -538,23 +539,26 @@ function bilinearSample(
     x: number,
     y: number,
 ): number {
-    // Get integer and fractional parts
-    const x0 = Math.floor(x);
-    const y0 = Math.floor(y);
-    const xFrac = x - x0;
-    const yFrac = y - y0;
+    // Clamp coordinates to valid range first (border padding mode)
+    // This ensures we get correct interpolation weights at boundaries
+    const xClamped = Math.max(0, Math.min(x, srcW - 1));
+    const yClamped = Math.max(0, Math.min(y, srcH - 1));
 
-    // Clamp coordinates
-    const x0c = Math.max(0, Math.min(x0, srcW - 1));
-    const y0c = Math.max(0, Math.min(y0, srcH - 1));
-    const x1c = Math.max(0, Math.min(x0 + 1, srcW - 1));
-    const y1c = Math.max(0, Math.min(y0 + 1, srcH - 1));
+    // Get integer and fractional parts from clamped coordinates
+    const x0 = Math.floor(xClamped);
+    const y0 = Math.floor(yClamped);
+    const xFrac = xClamped - x0;
+    const yFrac = yClamped - y0;
+
+    // Clamp neighbor coordinates (x0+1, y0+1 might exceed bounds)
+    const x1 = Math.min(x0 + 1, srcW - 1);
+    const y1 = Math.min(y0 + 1, srcH - 1);
 
     // Sample the 4 corners
-    const v00 = maskData[y0c * srcW + x0c];
-    const v10 = maskData[y0c * srcW + x1c];
-    const v01 = maskData[y1c * srcW + x0c];
-    const v11 = maskData[y1c * srcW + x1c];
+    const v00 = maskData[y0 * srcW + x0];
+    const v10 = maskData[y0 * srcW + x1];
+    const v01 = maskData[y1 * srcW + x0];
+    const v11 = maskData[y1 * srcW + x1];
 
     // Bilinear interpolation
     const v0 = v00 * (1 - xFrac) + v10 * xFrac;
@@ -563,17 +567,23 @@ function bilinearSample(
 }
 
 /**
- * Resize mask probabilities to full image size using bilinear interpolation,
- * then crop to the bounding box region (like usls does).
+ * Resize mask LOGITS to full image size using bilinear interpolation,
+ * then crop to the bounding box region.
  *
- * Note: This approach is fundamentally limited by the 288x288 decoder output.
+ * Key insight: We interpolate LOGITS (not probabilities), then threshold at 0.
+ * This matches the official SAM3 code (F.interpolate on logits, then > 0).
+ * Interpolating logits produces smoother edges because:
+ * - Logits have larger dynamic range near boundaries (e.g., -5 to +5)
+ * - Probabilities are squeezed (0.007 to 0.993), losing interpolation precision
+ *
+ * Uses align_corners=False coordinate mapping (matching PyTorch's F.interpolate):
+ * src_coord = (dst_coord + 0.5) * (src_size / dst_size) - 0.5
+ *
  * SAM2's decoder has upsampling built-in and outputs at target resolution,
  * while SAM3's decoder outputs fixed 288x288 requiring external upsampling.
- * For truly SAM2-quality edges, the SAM3 ONNX model would need to be
- * re-exported with upsampling included.
  */
 function resizeMaskFullThenCrop(
-    maskProbs: ArrayLike<number>,
+    maskLogits: ArrayLike<number>,  // LOGITS, not probabilities - threshold at 0
     srcW: number,
     srcH: number,
     imageW: number,
@@ -585,21 +595,28 @@ function resizeMaskFullThenCrop(
 ): number[][] {
     const result: number[][] = Array(cropH).fill(0).map(() => Array(cropW).fill(0));
 
+    // Precompute scale factors for align_corners=False mapping
+    const scaleX = srcW / imageW;
+    const scaleY = srcH / imageH;
+
     for (let y = 0; y < cropH; y++) {
         for (let x = 0; x < cropW; x++) {
             // Map crop coords to full image coords
             const imgX = cropLeft + x;
             const imgY = cropTop + y;
 
-            // Map full image coords to source mask coords
-            const srcX = (imgX / imageW) * srcW;
-            const srcY = (imgY / imageH) * srcH;
+            // Map full image coords to source mask coords using align_corners=False
+            // Formula: src = (dst + 0.5) * scale - 0.5
+            // This treats pixels as having area and maps centers to centers
+            const srcX = (imgX + 0.5) * scaleX - 0.5;
+            const srcY = (imgY + 0.5) * scaleY - 0.5;
 
-            // Bilinear interpolation of probability (like usls uses)
-            const prob = bilinearSample(maskProbs, srcW, srcH, srcX, srcY);
+            // Bilinear interpolation of LOGITS (matching PyTorch F.interpolate)
+            const logit = bilinearSample(maskLogits, srcW, srcH, srcX, srcY);
 
-            // Threshold AFTER interpolation for smooth edges
-            result[y][x] = prob > 0.5 ? 255 : 0;
+            // Threshold at 0 (equivalent to sigmoid > 0.5)
+            // This matches: F.interpolate(masks, orig_hw, mode="bilinear", align_corners=False) > 0
+            result[y][x] = logit > 0 ? 255 : 0;
         }
     }
 

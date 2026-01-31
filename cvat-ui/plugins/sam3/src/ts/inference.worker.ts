@@ -338,7 +338,9 @@ if ((self as any).importScripts) {
 
                 const maskData = predMasks.data as Float32Array;
 
-                // Extract the best mask
+                // Extract the best mask as LOGITS (not probabilities!)
+                // Key insight from reference implementations: resize logits, then threshold
+                // This produces smoother edges than sigmoid -> resize -> threshold
                 const maskSize = maskH * maskW;
                 const bestMaskLogits = new Float32Array(maskSize);
                 for (let i = 0; i < maskSize; i++) {
@@ -350,19 +352,12 @@ if ((self as any).importScripts) {
                 const logitsMax = Math.max(...bestMaskLogits);
                 console.log(`  Mask logits: min=${logitsMin.toFixed(3)}, max=${logitsMax.toFixed(3)}`);
 
-                // Apply sigmoid to get probabilities (NOT thresholding yet - that happens after upsampling)
-                const maskProbs = new Float32Array(maskSize);
-                for (let i = 0; i < maskSize; i++) {
-                    const v = bestMaskLogits[i];
-                    maskProbs[i] = 1.0 / (1.0 + Math.exp(-Math.max(-50, Math.min(50, v))));
-                }
-
-                // Calculate bounding box from probabilities (use 0.5 threshold for bounds)
+                // Calculate bounding box from logits (threshold at 0, equivalent to sigmoid > 0.5)
                 let xtl = maskW, ytl = maskH, xbr = 0, ybr = 0;
                 let hasPositivePixels = false;
                 for (let y = 0; y < maskH; y++) {
                     for (let x = 0; x < maskW; x++) {
-                        if (maskProbs[y * maskW + x] > 0.5) {
+                        if (bestMaskLogits[y * maskW + x] > 0) {
                             hasPositivePixels = true;
                             xtl = Math.min(xtl, x);
                             ytl = Math.min(ytl, y);
@@ -372,8 +367,8 @@ if ((self as any).importScripts) {
                     }
                 }
 
-                const positiveCount = Array.from(maskProbs).filter((v) => v > 0.5).length;
-                console.log(`  Mask probs: ${positiveCount}/${maskSize} above 0.5 (${(100*positiveCount/maskSize).toFixed(1)}%)`);
+                const positiveCount = Array.from(bestMaskLogits).filter((v) => v > 0).length;
+                console.log(`  Mask logits: ${positiveCount}/${maskSize} above 0 (${(100*positiveCount/maskSize).toFixed(1)}%)`);
                 // If no positive pixels, set bounds to full mask
                 if (!hasPositivePixels) {
                     xtl = 0;
@@ -404,12 +399,13 @@ if ((self as any).importScripts) {
                     }
                 }
 
-                // Send mask probabilities (NOT binary) for smooth upsampling on main thread
-                // Thresholding will happen AFTER bilinear interpolation for smooth edges
+                // Send mask LOGITS (NOT probabilities) for smooth upsampling on main thread
+                // Main thread will: bilinear interpolate logits -> threshold at 0
+                // This matches the reference Python implementation approach
                 postMessage({
                     action: WorkerAction.DECODE,
                     payload: {
-                        maskData: maskProbs,  // Probabilities [0,1], not binary
+                        maskData: bestMaskLogits,  // LOGITS, not probabilities - threshold at 0 after resize
                         maskH,
                         maskW,
                         iouScore: bestIou,
