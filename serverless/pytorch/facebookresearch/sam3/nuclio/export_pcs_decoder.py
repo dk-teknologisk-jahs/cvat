@@ -27,7 +27,7 @@ Architecture:
          ▼
     ┌─────────────┐
     │ Transformer │ (fuses image[72x72] + text/geometry features)
-    │   Encoder   │  NOTE: Only uses LAST FPN level (72x72) 
+    │   Encoder   │  NOTE: Only uses LAST FPN level (72x72)
     └─────────────┘
          │
          ▼
@@ -73,29 +73,29 @@ from sam3.model.box_ops import box_cxcywh_to_xyxy
 class PCSDecoderWrapper(nn.Module):
     """
     Wrapper for SAM3 PCS decoder that can be exported to ONNX.
-    
+
     Takes pre-computed vision and text features and runs the PCS pipeline.
-    
+
     Key insight: SAM3 uses num_feature_levels=1, meaning the transformer encoder
     only operates on the LAST (smallest) FPN level (72x72), but the segmentation
     head uses ALL FPN levels for upsampling masks.
     """
-    
+
     def __init__(self, sam3_model):
         super().__init__()
         self.sam3 = sam3_model
         self.num_feature_levels = sam3_model.num_feature_levels  # Should be 1
-        
+
         # Extract components we need
         self.geometry_encoder = sam3_model.geometry_encoder
         self.transformer = sam3_model.transformer
         self.segmentation_head = sam3_model.segmentation_head
         self.dot_prod_scoring = sam3_model.dot_prod_scoring
         self.hidden_dim = sam3_model.hidden_dim
-        
+
         # Clear any cached tensors that might be on wrong device
         self._clear_caches()
-    
+
     def _clear_caches(self):
         """Clear internal caches that might have wrong device tensors."""
         # Clear decoder coord cache
@@ -105,7 +105,7 @@ class PCSDecoderWrapper(nn.Module):
             self.transformer.decoder.coord_cache = {}
         if hasattr(self.transformer.decoder, 'compilable_stored_size'):
             self.transformer.decoder.compilable_stored_size = None
-        
+
     def forward(
         self,
         # Vision encoder outputs (FPN features) - all 3 levels for segmentation head
@@ -122,7 +122,7 @@ class PCSDecoderWrapper(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Run PCS decoder pipeline.
-        
+
         Returns:
             masks: [B, num_queries, H, W] predicted masks at 72x72 resolution
             boxes: [B, num_queries, 4] predicted boxes (xyxy format, normalized 0-1)
@@ -130,26 +130,26 @@ class PCSDecoderWrapper(nn.Module):
         """
         batch_size = fpn_feat_0.shape[0]
         device = fpn_feat_0.device
-        
+
         # All FPN levels (for segmentation head)
         backbone_fpn_all = [fpn_feat_0, fpn_feat_1, fpn_feat_2]
         vis_pos_enc_all = [fpn_pos_0, fpn_pos_1, fpn_pos_2]
-        
+
         # Only LAST level for transformer encoder (num_feature_levels=1)
         vis_feats = backbone_fpn_all[-self.num_feature_levels:]  # [fpn_feat_2]
         vis_pos_enc = vis_pos_enc_all[-self.num_feature_levels:]  # [fpn_pos_2]
         vis_feat_sizes = [(72, 72)]  # Only 72x72
-        
+
         # Flatten to sequence format: [B, C, H, W] -> [H*W, B, C]
         img_feats = [x.flatten(2).permute(2, 0, 1) for x in vis_feats]
         img_pos_embeds = [x.flatten(2).permute(2, 0, 1) for x in vis_pos_enc]
-        
+
         # Create empty geometry prompt (text-only mode)
         geometric_prompt = Prompt(
             box_embeddings=torch.zeros(0, batch_size, 4, device=device),
             box_mask=torch.zeros(batch_size, 0, device=device, dtype=torch.bool),
         )
-        
+
         # Encode geometry (empty for text-only)
         geo_feats, geo_masks = self.geometry_encoder(
             geo_prompt=geometric_prompt,
@@ -157,13 +157,13 @@ class PCSDecoderWrapper(nn.Module):
             img_sizes=vis_feat_sizes,
             img_pos_embeds=img_pos_embeds,
         )
-        
+
         # Combine text and geometry prompts
         # text_features: [32, B, 256]
         # geo_feats: [0, B, 256] (empty for text-only)
         prompt = torch.cat([text_features, geo_feats], dim=0)
         prompt_mask = torch.cat([text_mask, geo_masks], dim=1)
-        
+
         # Run transformer encoder (only on 72x72 features)
         prompt_pos_embed = torch.zeros_like(prompt)
         memory = self.transformer.encoder(
@@ -175,15 +175,15 @@ class PCSDecoderWrapper(nn.Module):
             prompt_key_padding_mask=prompt_mask,
             feat_sizes=vis_feat_sizes,
         )
-        
+
         encoder_hidden_states = memory["memory"]
         pos_embed = memory["pos_embed"]
         padding_mask = memory["padding_mask"]
-        
+
         # Run transformer decoder
         query_embed = self.transformer.decoder.query_embed.weight
         tgt = query_embed.unsqueeze(1).repeat(1, batch_size, 1)
-        
+
         hs, reference_boxes, dec_presence_out, _ = self.transformer.decoder(
             tgt=tgt,
             memory=encoder_hidden_states,
@@ -198,25 +198,25 @@ class PCSDecoderWrapper(nn.Module):
             text_attention_mask=prompt_mask,
             apply_dac=False,
         )
-        
+
         # Convert to batch-first
         hs = hs.transpose(1, 2)  # [num_layers, B, num_queries, C]
         reference_boxes = reference_boxes.transpose(1, 2)
-        
+
         # Compute scores using dot product scoring
         outputs_class = self.dot_prod_scoring(hs, prompt, prompt_mask)
-        
+
         # Apply presence score to final class scores
         presence_score = dec_presence_out.transpose(1, 2).sigmoid()  # [layers, B, queries]
         final_scores = (outputs_class[-1].sigmoid() * presence_score[-1].unsqueeze(-1)).squeeze(-1)
-        
+
         # Compute boxes
         box_head = self.transformer.decoder.bbox_embed
         anchor_box_offsets = box_head(hs)
         reference_boxes_inv_sig = inverse_sigmoid(reference_boxes)
         outputs_coord = (reference_boxes_inv_sig + anchor_box_offsets).sigmoid()
         boxes_xyxy = box_cxcywh_to_xyxy(outputs_coord[-1])  # [B, num_queries, 4]
-        
+
         # Run segmentation head with ALL FPN levels
         seg_outputs = self.segmentation_head(
             backbone_feats=backbone_fpn_all,
@@ -226,9 +226,9 @@ class PCSDecoderWrapper(nn.Module):
             prompt=prompt,
             prompt_mask=prompt_mask,
         )
-        
+
         masks = seg_outputs["pred_masks"]  # [B, num_queries, H, W]
-        
+
         return masks, boxes_xyxy, final_scores
 
 
@@ -252,9 +252,9 @@ def get_sample_inputs(batch_size: int = 1, device: str = "cuda"):
 def test_wrapper(wrapper, device="cuda"):
     """Test the wrapper with sample inputs."""
     print("\nTesting PCS decoder wrapper...")
-    
+
     inputs = get_sample_inputs(batch_size=1, device=device)
-    
+
     with torch.no_grad():
         masks, boxes, scores = wrapper(
             inputs["fpn_feat_0"],
@@ -266,31 +266,31 @@ def test_wrapper(wrapper, device="cuda"):
             inputs["text_features"],
             inputs["text_mask"],
         )
-    
+
     print(f"  Masks shape: {masks.shape}")
     print(f"  Boxes shape: {boxes.shape}")
     print(f"  Scores shape: {scores.shape}")
     print(f"  Score range: [{scores.min():.4f}, {scores.max():.4f}]")
-    
+
     return masks, boxes, scores
 
 
 def export_to_onnx(wrapper, output_path: str, device: str = "cuda"):
     """Export the PCS decoder to ONNX."""
     print(f"\nExporting PCS decoder to {output_path}...")
-    
+
     inputs = get_sample_inputs(batch_size=1, device=device)
-    
+
     # Input names
     input_names = [
         "fpn_feat_0", "fpn_feat_1", "fpn_feat_2",
         "fpn_pos_0", "fpn_pos_1", "fpn_pos_2",
         "text_features", "text_mask",
     ]
-    
+
     # Output names
     output_names = ["masks", "boxes", "scores"]
-    
+
     # Dynamic axes for batch size
     dynamic_axes = {
         "fpn_feat_0": {0: "batch"},
@@ -305,7 +305,7 @@ def export_to_onnx(wrapper, output_path: str, device: str = "cuda"):
         "boxes": {0: "batch"},
         "scores": {0: "batch"},
     }
-    
+
     # Export
     torch.onnx.export(
         wrapper,
@@ -317,15 +317,15 @@ def export_to_onnx(wrapper, output_path: str, device: str = "cuda"):
         opset_version=17,
         do_constant_folding=True,
     )
-    
+
     print(f"Exported to {output_path}")
-    
+
     # Verify
     import onnx
     model = onnx.load(output_path)
     onnx.checker.check_model(model)
     print("ONNX model verified!")
-    
+
     # Print size
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
     print(f"Model size: {size_mb:.1f} MB")
@@ -335,12 +335,12 @@ def main():
     print("=" * 60)
     print("SAM3 PCS Decoder Export")
     print("=" * 60)
-    
+
     # Use CPU for export to avoid GPU memory issues
     # The model will still work on GPU at inference time
     device = "cpu"
     print(f"\nUsing device: {device} (for export, avoids GPU memory issues)")
-    
+
     # Build SAM3 model with segmentation enabled
     print("\nLoading SAM3 model...")
     sam3_model = build_sam3_image_model(
@@ -350,25 +350,25 @@ def main():
         enable_segmentation=True,
         enable_inst_interactivity=False,
     )
-    
+
     # Create wrapper
     print("\nCreating PCS decoder wrapper...")
     wrapper = PCSDecoderWrapper(sam3_model)
     wrapper.eval()
-    
+
     # Test wrapper
     test_wrapper(wrapper, device)
-    
+
     # Export to ONNX
     output_path = os.path.join(os.path.dirname(__file__), "pcs_decoder.onnx")
-    
+
     try:
         export_to_onnx(wrapper, output_path, device)
     except Exception as e:
         print(f"\nONNX export failed: {e}")
         import traceback
         traceback.print_exc()
-        
+
         print("\n" + "=" * 60)
         print("Export failed - analyzing the issue...")
         print("=" * 60)
