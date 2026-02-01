@@ -51,6 +51,7 @@ export interface SerializedModel {
     min_neg_points?: number;
     startswith_box?: boolean;
     startswith_box_optional?: boolean;
+    supports_text_prompt?: boolean;
     created_date?: string;
     updated_date?: string;
 }

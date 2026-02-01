@@ -244,6 +244,7 @@ class LambdaFunction:
         self.animated_gif = meta_anno.get("animated_gif", "")
         self.version = int(meta_anno.get("version", "1"))
         self.help_message = meta_anno.get("help_message", "")
+        self.supports_text_prompt = meta_anno.get("supports_text_prompt", "false").lower() == "true"
         self.gateway = gateway
 
     def to_dict(self):
@@ -265,6 +266,14 @@ class LambdaFunction:
                     "startswith_box_optional": self.startswith_box_optional,
                     "help_message": self.help_message,
                     "animated_gif": self.animated_gif,
+                }
+            )
+
+        if self.kind is FunctionKind.DETECTOR:
+            response.update(
+                {
+                    "supports_text_prompt": self.supports_text_prompt,
+                    "help_message": self.help_message,
                 }
             )
 
@@ -418,12 +427,14 @@ class LambdaFunction:
                         mapping_item["sublabels"], md_label["sublabels"], db_label.sublabels.all()
                     )
 
-        if not mapping:
-            mapping = make_default_mapping(model_labels, task_labels)
-        else:
-            validate_labels_mapping(mapping, self.labels, task_labels)
+        # Skip mapping validation and processing for text prompt based detection
+        if not data.get("text_prompts"):
+            if not mapping:
+                mapping = make_default_mapping(model_labels, task_labels)
+            else:
+                validate_labels_mapping(mapping, self.labels, task_labels)
 
-        mapping = update_mapping(mapping, self.labels, task_labels)
+            mapping = update_mapping(mapping, self.labels, task_labels)
 
         # Check job frame boundaries
         if db_job:
@@ -443,6 +454,13 @@ class LambdaFunction:
 
         if self.kind == FunctionKind.DETECTOR:
             payload.update({"image": self._get_image(db_task, mandatory_arg("frame"))})
+            # Support text-based prompts for models that have this capability
+            text_prompts = data.get("text_prompts")
+            if text_prompts:
+                payload.update({"text_prompts": text_prompts})
+            threshold = data.get("threshold")
+            if threshold is not None:
+                payload.update({"threshold": threshold})
         elif self.kind == FunctionKind.INTERACTOR:
             payload.update(
                 {
@@ -525,33 +543,39 @@ class LambdaFunction:
             return attributes
 
         if self.kind == FunctionKind.DETECTOR:
-            response_filtered = []
+            # For text prompt based detection, labels come from the prompt itself
+            # and don't need mapping - just pass through the response
+            if data.get("text_prompts"):
+                response_filtered = response
+            else:
+                # Standard label mapping based detection
+                response_filtered = []
 
-            for item in response:
-                item_label = item["label"]
-                if item_label not in mapping:
-                    continue
-                db_label = mapping[item_label]["db_label"]
-                item["label"] = db_label.name
-                item["attributes"] = transform_attributes(
-                    item.get("attributes", {}),
-                    mapping[item_label]["attributes"],
-                    db_label.attributespec_set.values(),
-                )
+                for item in response:
+                    item_label = item["label"]
+                    if item_label not in mapping:
+                        continue
+                    db_label = mapping[item_label]["db_label"]
+                    item["label"] = db_label.name
+                    item["attributes"] = transform_attributes(
+                        item.get("attributes", {}),
+                        mapping[item_label]["attributes"],
+                        db_label.attributespec_set.values(),
+                    )
 
-                if "elements" in item:
-                    sublabels = mapping[item_label]["sublabels"]
-                    item["elements"] = [x for x in item["elements"] if x["label"] in sublabels]
-                    for element in item["elements"]:
-                        element_label = element["label"]
-                        db_label = sublabels[element_label]["db_label"]
-                        element["label"] = db_label.name
-                        element["attributes"] = transform_attributes(
-                            element.get("attributes", {}),
-                            sublabels[element_label]["attributes"],
-                            db_label.attributespec_set.values(),
-                        )
-                response_filtered.append(item)
+                    if "elements" in item:
+                        sublabels = mapping[item_label]["sublabels"]
+                        item["elements"] = [x for x in item["elements"] if x["label"] in sublabels]
+                        for element in item["elements"]:
+                            element_label = element["label"]
+                            db_label = sublabels[element_label]["db_label"]
+                            element["label"] = db_label.name
+                            element["attributes"] = transform_attributes(
+                                element.get("attributes", {}),
+                                sublabels[element_label]["attributes"],
+                                db_label.attributespec_set.values(),
+                            )
+                    response_filtered.append(item)
 
             response = response_filtered
         elif self.kind == FunctionKind.TRACKER:

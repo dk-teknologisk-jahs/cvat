@@ -247,3 +247,54 @@ Fixed `bpe()` function to match SimpleTokenizer: `word = tuple(token[:-1]) + (to
 2. Add text prompt UI to CVAT frontend
 3. Integration testing with CVAT backend
 
+### 2026-02-01 - CVAT Integration Complete
+
+**Added text prompt support to CVAT UI and backend:**
+
+1. **Backend (views.py)**:
+   - Added `supports_text_prompt` annotation parsing
+   - Added `text_prompts` parameter support for detectors
+   - Skip label mapping for text-based detectors (labels come from prompts)
+   - Pass `threshold` parameter to function
+
+2. **Frontend (detector-runner.tsx)**:
+   - Added text prompt input for models with `supportsTextPrompt: true`
+   - Text prompt split by commas into array of prompts
+   - Shows label mapper OR text prompt based on model type
+
+3. **Model (ml-model.ts)**:
+   - Added `supportsTextPrompt` property getter
+
+4. **Function config (function_pcs.yaml)**:
+   - Added `supports_text_prompt: true` annotation
+   - Type set to `detector` to use detector runner UI
+
+5. **Handler (main_pcs.py)**:
+   - Updated to return CVAT detector format: flat array of DetectedShape
+   - Mask format: `[rle_counts..., xtl, ytl, xbr, ybr]`
+   - Implemented `mask_to_cvat_rle()` function for proper mask encoding
+
+**How it works:**
+1. User selects SAM3 Text-to-Segment model in detector runner
+2. User enters comma-separated text prompts (e.g., "person, car, dog")
+3. Click "Annotate" sends request with `text_prompts` array
+4. Backend passes image + text_prompts to Nuclio function
+5. Function returns detected masks with labels from prompts
+6. CVAT creates mask annotations
+
+**Files changed:**
+- `cvat/apps/lambda_manager/views.py` - Text prompt handling
+- `cvat-core/src/core-types.ts` - SerializedModel interface
+- `cvat-core/src/ml-model.ts` - supportsTextPrompt getter
+- `cvat-ui/src/components/model-runner-modal/detector-runner.tsx` - Text input UI
+- `cvat-ui/src/components/model-runner-modal/styles.scss` - Styling
+- `serverless/.../function_pcs.yaml` - Function config
+- `serverless/.../main_pcs.py` - CVAT detector format
+
+**Status:**
+✅ Backend support for text prompts
+✅ Frontend text prompt UI
+✅ CVAT detector response format
+🔄 Integration testing needed
+
+

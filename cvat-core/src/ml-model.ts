@@ -73,6 +73,10 @@ export default class MLModel {
         };
     }
 
+    public get supportsTextPrompt(): boolean {
+        return this.serialized.supports_text_prompt || false;
+    }
+
     public get owner(): string {
         return this.serialized?.owner?.username || '';
     }

@@ -13,38 +13,32 @@ This handler supports:
 - Combined text + box: Use box guidance with text description
 - Multi-instance: Find all instances of a concept in the image
 
-Expected input:
+Expected input (from CVAT):
 {
     "image": "<base64 encoded image>",
     "text_prompts": ["a person", "a car"],  # List of text descriptions
-    "confidence_threshold": 0.3,  # Optional, default 0.3
-    "box": [x1, y1, x2, y2],  # Optional box guidance (pixel coords)
-    "is_positive_box": true,  # Optional, default true
+    "threshold": 0.3,  # Optional confidence threshold
 }
 
-Returns:
-{
-    "detections": [
-        {
-            "mask": "<base64 RLE encoded mask>",
-            "box": [x1, y1, x2, y2],
-            "score": 0.95,
-            "label": "a person"
-        },
-        ...
-    ]
-}
+Returns (CVAT detector format):
+[
+    {
+        "type": "mask",
+        "label": "a person",
+        "mask": [rle_encoded_mask_data],  # CVAT RLE format
+        "attributes": []
+    },
+    ...
+]
 """
 
 import base64
 import io
 import json
-import os
-from typing import Dict, List
+from typing import List
 
 import numpy as np
 from PIL import Image
-from pycocotools import mask as mask_utils  # For RLE encoding
 
 from model_handler_pcs import ModelHandlerPCS
 
@@ -62,54 +56,83 @@ def init_context(context):
     context.logger.info("Init SAM3-PCS context... 100%")
 
 
-def encode_mask_rle(mask: np.ndarray) -> Dict:
+def mask_to_cvat_rle(mask: np.ndarray) -> List[int]:
     """
-    Encode a binary mask using RLE (Run-Length Encoding).
-
+    Convert binary mask to CVAT RLE format.
+    
+    CVAT RLE format: [rle_counts..., xtl, ytl, xbr, ybr]
+    
     Args:
-        mask: np.ndarray [H, W] boolean or uint8 mask
-
+        mask: np.ndarray [H, W] boolean or uint8 binary mask
+    
     Returns:
-        RLE dict with 'counts' (base64 string) and 'size' [H, W]
+        List of integers: RLE counts followed by bounding box
     """
-    # Ensure mask is uint8 and Fortran contiguous (required by pycocotools)
-    mask_uint8 = np.asfortranarray(mask.astype(np.uint8))
-
-    # Encode using COCO RLE
-    rle = mask_utils.encode(mask_uint8)
-
-    # Convert counts bytes to base64 for JSON serialization
-    rle['counts'] = base64.b64encode(rle['counts']).decode('utf-8')
-    rle['size'] = list(rle['size'])
-
+    # Find bounding box of the mask
+    rows = np.any(mask, axis=1)
+    cols = np.any(mask, axis=0)
+    if not rows.any() or not cols.any():
+        # Empty mask
+        return [0, 0, 0, 0]
+    
+    y_min, y_max = np.where(rows)[0][[0, -1]]
+    x_min, x_max = np.where(cols)[0][[0, -1]]
+    
+    # Convert to CVAT format (xtl, ytl, xbr, ybr)
+    xtl, ytl = int(x_min), int(y_min)
+    xbr, ybr = int(x_max) + 1, int(y_max) + 1
+    
+    # Crop mask to bounding box
+    cropped = mask[ytl:ybr, xtl:xbr]
+    
+    # Flatten in row-major (C) order
+    flat = cropped.flatten().astype(np.uint8)
+    
+    # Encode as RLE (run-length encoding)
+    # CVAT format: starts with count of 0s, then alternates
+    rle = []
+    if len(flat) == 0:
+        return [0, 0, 0, 0]
+    
+    current_val = 0  # Start counting 0s first
+    count = 0
+    
+    for val in flat:
+        if val == current_val:
+            count += 1
+        else:
+            rle.append(count)
+            count = 1
+            current_val = val
+    rle.append(count)
+    
+    # Append bounding box
+    rle.extend([xtl, ytl, xbr, ybr])
+    
     return rle
 
 
 def handler(context, event):
     """
     Handle text-to-segment requests.
-
-    Expected input:
+    
+    Expected input (from CVAT detector runner):
     {
         "image": "<base64 encoded image>",
         "text_prompts": ["a person", "a car"],
-        "confidence_threshold": 0.3,  # Optional
-        "box": [x1, y1, x2, y2],  # Optional
-        "is_positive_box": true,  # Optional
+        "threshold": 0.3,  # Optional confidence threshold
     }
-
-    Returns:
-    {
-        "detections": [
-            {
-                "mask": {"counts": "<base64 RLE>", "size": [H, W]},
-                "box": [x1, y1, x2, y2],
-                "score": 0.95,
-                "label": "a person"
-            },
-            ...
-        ]
-    }
+    
+    Returns (CVAT detector format - flat array):
+    [
+        {
+            "type": "mask",
+            "label": "a person",
+            "mask": [rle_counts..., xtl, ytl, xbr, ybr],
+            "attributes": []
+        },
+        ...
+    ]
     """
     try:
         context.logger.info("SAM3-PCS handler called")
@@ -124,9 +147,7 @@ def handler(context, event):
 
         # Get parameters
         text_prompts = data.get("text_prompts", [])
-        confidence_threshold = data.get("confidence_threshold", 0.3)
-        box = data.get("box")
-        is_positive_box = data.get("is_positive_box", True)
+        confidence_threshold = data.get("threshold", data.get("confidence_threshold", 0.3))
 
         if not text_prompts:
             return context.Response(
@@ -143,33 +164,21 @@ def handler(context, event):
         pcs_handler.set_image(image)
 
         # Run text-to-segment
-        if box:
-            # Combined text + box
-            results = pcs_handler.text_and_box_to_segment(
-                text_prompt=text_prompts[0],  # Use first prompt with box
-                box=box,
-                is_positive=is_positive_box,
-            )
-        else:
-            # Text-only
-            results = pcs_handler.text_to_segment(text_prompts)
+        results = pcs_handler.text_to_segment(text_prompts)
 
-        # Format response
-        detections = []
+        # Format response for CVAT (flat array of DetectedShape)
+        response = []
         for r in results:
             detection = {
-                'mask': encode_mask_rle(r['mask']),
-                'box': r['box'],
-                'score': r['score'],
+                'type': 'mask',
                 'label': r['label'],
+                'mask': mask_to_cvat_rle(r['mask']),
+                'attributes': [],
             }
-            detections.append(detection)
+            response.append(detection)
 
-        response = {
-            'detections': detections,
-            'image_size': [image.height, image.width],
-        }
-
+        context.logger.info(f"SAM3-PCS returning {len(response)} detections")
+        
         return context.Response(
             body=json.dumps(response),
             headers={},
