@@ -4,6 +4,95 @@ This document describes how to export SAM3-Tracker ONNX models that match SAM2's
 
 ---
 
+## Quick Reference: Current Working Implementation
+
+> **Last Updated**: February 2026
+
+### Architecture Summary
+
+| Component | Location | Status |
+|-----------|----------|--------|
+| **PyTorch Encoder** | `serverless/pytorch/facebookresearch/sam3/nuclio/model_handler_pytorch.py` | ✅ Working |
+| **ONNX Decoder** | `cvat-ui/plugins/sam3/assets/tracker-prompt-encoder-mask-decoder-with-mask-input.onnx` | ✅ Working (16.3 MB) |
+| **Export Script** | `serverless/pytorch/facebookresearch/sam3/nuclio/export_sam3_onnx.py` | ✅ Complete |
+| **Test Suite** | `serverless/pytorch/facebookresearch/sam3/nuclio/test_sam3_multiclick.py` | ✅ 10/10 tests pass |
+
+### Why PyTorch Encoder (Not ONNX)?
+
+The SAM3 vision encoder **cannot be exported to ONNX** due to `view_as_complex` operations in the RoPE (Rotary Position Embedding) used by the ViT backbone. These complex number operations are not supported in ONNX opset 17+.
+
+**Solution**: Use PyTorch for server-side image encoding, ONNX for browser-side decoding.
+
+### Key Implementation Details
+
+1. **Model Loading** (CRITICAL):
+   ```python
+   # CORRECT: Use build_sam3_image_model with enable_inst_interactivity=True
+   from sam3.model_builder import build_sam3_image_model
+   model = build_sam3_image_model(
+       device=device,
+       eval_mode=True,
+       load_from_HF=True,  # Loads checkpoint from HuggingFace
+       enable_inst_interactivity=True,  # Creates tracker with loaded weights
+   )
+   
+   # WRONG: build_tracker() does NOT load checkpoint weights!
+   # from sam3.model_builder import build_tracker
+   # tracker = build_tracker(...)  # Random weights, ~0.5 IoU, 90%+ mask coverage
+   ```
+
+2. **Channel Projections**:
+   ```python
+   # The backbone outputs 256ch features at all levels
+   # conv_s0/conv_s1 project to 32ch/64ch for high-res features
+   backbone_out["backbone_fpn"][0] = tracker.sam_mask_decoder.conv_s0(backbone_out["backbone_fpn"][0])
+   backbone_out["backbone_fpn"][1] = tracker.sam_mask_decoder.conv_s1(backbone_out["backbone_fpn"][1])
+   ```
+
+3. **Embedding Shapes**:
+   | Name | Shape | Description |
+   |------|-------|-------------|
+   | `high_res_feats_0` | `[B, 32, 288, 288]` | Level 0 high-res features |
+   | `high_res_feats_1` | `[B, 64, 144, 144]` | Level 1 high-res features |
+   | `image_embed` | `[B, 256, 72, 72]` | Main backbone embedding |
+
+4. **ONNX Decoder Inputs/Outputs**:
+   ```
+   Inputs:
+     - image_embed: [B, 256, 72, 72] FLOAT32
+     - high_res_feats_0: [B, 32, 288, 288] FLOAT32
+     - high_res_feats_1: [B, 64, 144, 144] FLOAT32
+     - point_coords: [B, N, 2] FLOAT32 (in 1008x1008 space)
+     - point_labels: [B, N] FLOAT32 (1=positive, 0=negative)
+     - mask_input: [B, 1, 288, 288] FLOAT32 (previous low_res_mask)
+     - has_mask_input: [B] FLOAT32 (1.0 if using mask refinement)
+   
+   Outputs:
+     - masks: [B, 3, 1008, 1008] FLOAT32
+     - iou_predictions: [B, 3] FLOAT32
+     - low_res_masks: [B, 3, 288, 288] FLOAT32 (for refinement)
+     - object_score_logits: [B, 1] FLOAT32
+   ```
+
+### Running Tests
+
+```bash
+cd cvat
+conda activate grimme-tf2.18  # Or your SAM3 environment
+python serverless/pytorch/facebookresearch/sam3/nuclio/test_sam3_multiclick.py --device cpu --save-viz
+```
+
+### Re-Exporting the Decoder
+
+```bash
+cd cvat
+python serverless/pytorch/facebookresearch/sam3/nuclio/export_sam3_onnx.py \
+    --export decoder \
+    --output cvat-ui/plugins/sam3/assets/tracker-prompt-encoder-mask-decoder-with-mask-input.onnx
+```
+
+---
+
 ## Key Findings from Official SAM3 Implementation
 
 ### 1. Dynamic Mask Selection (`_dynamic_multimask_via_stability`)
