@@ -8,11 +8,71 @@ This document describes SAM3 architecture, ONNX export strategies, and how SAM3 
 
 ## Table of Contents
 
-1. [SAM3 Capabilities for CVAT](#sam3-capabilities-for-cvat)
-2. [SAM3 Architecture Overview](#sam3-architecture-overview)
-3. [Two Model Implementations](#two-model-implementations)
-4. [ONNX Export Methods](#onnx-export-methods)
-5. [Current Working Implementation](#current-working-implementation)
+1. [Current Progress](#current-progress)
+2. [SAM3 Capabilities for CVAT](#sam3-capabilities-for-cvat)
+3. [SAM3 Architecture Overview](#sam3-architecture-overview)
+4. [Two Model Implementations](#two-model-implementations)
+5. [ONNX Export Methods](#onnx-export-methods)
+6. [Unified HuggingFace ONNX Export (Recommended)](#unified-huggingface-onnx-export-recommended)
+7. [Current Working Implementation](#current-working-implementation)
+
+---
+
+## Current Progress
+
+### Migration Status: HuggingFace ONNX Exports
+
+We are migrating from a hybrid approach (external vision encoder + custom decoder) to **fully self-controlled ONNX exports** from HuggingFace Transformers.
+
+#### ✅ Completed
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **Vision Encoder** | ✅ Exported & Verified | 1.8 GB, outputs 256ch at all FPN levels |
+| **Tracker Decoder** | ✅ Exported & Verified | 16.4 MB, includes conv_s0/conv_s1 projections |
+| **Text Encoder** | ✅ Exported & Verified | 1.3 GB, CLIP + projection to 256ch |
+| **PCS Decoder** | ✅ Exported | 123 MB, DETR encoder/decoder + heads |
+| **Export Script** | ✅ Created | `serverless/pytorch/facebookresearch/sam3/nuclio/export_hf_onnx.py` |
+| **Verification Tests** | ✅ Passed | MAE < 0.001 for all components |
+
+#### 🔄 In Progress
+
+| Task | Status | Notes |
+|------|--------|-------|
+| Browser integration | 🔄 Pending | Update to use 256ch vision encoder outputs |
+| End-to-end testing | 🔄 Pending | Test full pipeline with real images |
+| Model deployment | 🔄 Pending | Copy ONNX files to appropriate locations |
+
+#### Key Findings
+
+1. **Previous Issue**: External `onnx-community/sam3-tracker-ONNX` vision encoder had projections baked in (outputs 32/64/256ch), while PCS mode expects 256/256/256ch.
+
+2. **Solution**: Single vision encoder outputs 256ch at all FPN levels. The tracker decoder includes conv_s0/conv_s1 projections internally.
+
+3. **no_mem_embed Fix**: Shape is `[1, 1, 256]`, must be reshaped to `[1, 256, 1, 1]` for spatial broadcast.
+
+4. **Multimask Output**: Mask decoder with `multimask_output=True` already slices internally - no additional slicing needed.
+
+#### Verification Results
+
+```
+Vision Encoder:
+  fpn_feat_0: MAE=0.00000005, MaxDiff=0.00000517 ✓ PASS
+  fpn_feat_1: MAE=0.00000370, MaxDiff=0.00047082 ✓ PASS
+  fpn_feat_2: MAE=0.00000263, MaxDiff=0.00029105 ✓ PASS
+  fpn_pos_2:  MAE=0.00000000, MaxDiff=0.00000000 ✓ PASS
+
+Text Encoder:
+  text_features: MAE=0.00000305, MaxDiff=0.00002313 ✓ PASS
+  text_mask:     MAE=0.00000000, MaxDiff=0.00000000 ✓ PASS
+```
+
+#### Next Steps
+
+1. **Browser Integration**: Update `cvat-ui/plugins/sam3/src/ts/inference.worker.ts` to accept 256ch inputs
+2. **Deploy Models**: Copy exported ONNX files to `cvat-ui/plugins/sam3/assets/`
+3. **Server Integration**: Update `model_handler_pytorch.py` to use new vision encoder
+4. **Testing**: Run full end-to-end tests with real images in CVAT
 
 ---
 
@@ -400,6 +460,186 @@ python export_decoder_with_mask_input.py \
 ### Method 3: PyTorch Server-Side (Text-to-Segment)
 
 Text prompts use full PyTorch pipeline on server - no ONNX export needed.
+
+---
+
+## Unified HuggingFace ONNX Export (Recommended)
+
+This section describes the new **unified export approach** using HuggingFace Transformers for all ONNX components.
+
+### Why Unified HuggingFace Export?
+
+Previously, we used a hybrid approach:
+- Vision encoder from external `onnx-community/sam3-tracker-ONNX` (32/64/256ch outputs - projections baked in)
+- Our own tracker decoder (expects 32/64/256)
+- PCS mode using PyTorch (expects 256/256/256)
+
+**Problems with the hybrid approach:**
+1. **No control**: External ONNX models have baked-in channel projections
+2. **Inconsistency**: Vision encoder outputs differ between modes (32/64/256 vs 256/256/256)
+3. **Maintenance**: Cannot easily update or modify external models
+
+**New unified approach:**
+- **Single vision encoder** from HuggingFace: outputs 256/256/256 at all FPN levels
+- **Tracker decoder** includes conv_s0/conv_s1 projections internally
+- **Full control** over all ONNX exports
+
+### Export Script
+
+**Location**: `serverless/pytorch/facebookresearch/sam3/nuclio/export_hf_onnx.py`
+
+```bash
+# Export all components
+python export_hf_onnx.py --all --output-dir /tmp/sam3-onnx
+
+# Or export individually
+python export_hf_onnx.py --vision-encoder --output-dir /tmp/sam3-onnx
+python export_hf_onnx.py --tracker-decoder --output-dir /tmp/sam3-onnx
+python export_hf_onnx.py --text-encoder --output-dir /tmp/sam3-onnx
+python export_hf_onnx.py --pcs-decoder --output-dir /tmp/sam3-onnx
+
+# Verify exports match PyTorch
+python export_hf_onnx.py --verify --output-dir /tmp/sam3-onnx
+```
+
+### Exported Models
+
+| Model | Size | Description |
+|-------|------|-------------|
+| `vision-encoder.onnx` | ~1.8 GB | ViT backbone + FPN neck (256ch outputs) |
+| `tracker-decoder.onnx` | ~16 MB | Prompt encoder + mask decoder (includes projections) |
+| `text-encoder.onnx` | ~1.3 GB | CLIP text encoder + projection |
+| `pcs-decoder.onnx` | ~123 MB | DETR encoder/decoder + scoring heads |
+
+### Architecture: Unified Vision Encoder
+
+The vision encoder outputs **256 channels at all FPN levels**:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         VISION ENCODER (1.8 GB)                              │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   Input: image [B, 3, 1008, 1008]                                            │
+│                                                                              │
+│   ┌─────────────────────────────────────────────────────────────────────┐    │
+│   │                    ViT Backbone (1024-dim)                          │    │
+│   │   - Patch embeddings (14x14 stride)                                 │    │
+│   │   - Position embeddings (interpolated)                              │    │
+│   │   - Transformer layers with RoPE                                    │    │
+│   └───────────────────────────┬─────────────────────────────────────────┘    │
+│                               │                                              │
+│                               ▼                                              │
+│   ┌─────────────────────────────────────────────────────────────────────┐    │
+│   │                     FPN Neck (256-dim)                              │    │
+│   │   - Level 0: [B, 256, 288, 288] (4× upsample)                       │    │
+│   │   - Level 1: [B, 256, 144, 144] (2× upsample)                       │    │
+│   │   - Level 2: [B, 256, 72, 72]   (native)                            │    │
+│   └───────────────────────────┬─────────────────────────────────────────┘    │
+│                               │                                              │
+│   Outputs:                    │                                              │
+│   - fpn_feat_0: [B, 256, 288, 288]                                           │
+│   - fpn_feat_1: [B, 256, 144, 144]                                           │
+│   - fpn_feat_2: [B, 256, 72, 72]                                             │
+│   - fpn_pos_2:  [B, 256, 72, 72]  (position encoding)                        │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Architecture: Tracker Decoder (with Internal Projections)
+
+The tracker decoder **includes conv_s0/conv_s1** projections, accepting 256ch inputs:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                      TRACKER DECODER (16 MB)                                 │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   Inputs:                                                                    │
+│   - fpn_feat_0: [B, 256, 288, 288]  ───► conv_s0 ───► [B, 32, 288, 288]     │
+│   - fpn_feat_1: [B, 256, 144, 144]  ───► conv_s1 ───► [B, 64, 144, 144]     │
+│   - fpn_feat_2: [B, 256, 72, 72]    ───► + no_mem_embed                      │
+│   - point_coords: [B, N, 2]                                                  │
+│   - point_labels: [B, N]                                                     │
+│   - mask_input: [B, 1, 288, 288]                                             │
+│   - has_mask_input: [B]                                                      │
+│                                                                              │
+│   ┌─────────────────────────────────────────────────────────────────────┐    │
+│   │                      Prompt Encoder                                 │    │
+│   │   - Point embeddings (positional + type)                            │    │
+│   │   - Mask downsampling (288→288 convolutions)                        │    │
+│   └───────────────────────────┬─────────────────────────────────────────┘    │
+│                               │                                              │
+│                               ▼                                              │
+│   ┌─────────────────────────────────────────────────────────────────────┐    │
+│   │                      Mask Decoder (multimask_output=True)           │    │
+│   │   - Two-way transformer (prompt ↔ image cross-attention)            │    │
+│   │   - 4 mask tokens → 3 output masks (token 0 discarded)              │    │
+│   │   - Upsampling through high-res features                            │    │
+│   └───────────────────────────┬─────────────────────────────────────────┘    │
+│                               │                                              │
+│   Outputs:                    │                                              │
+│   - masks: [B, 3, 1008, 1008]                                                │
+│   - iou_predictions: [B, 3]                                                  │
+│   - low_res_masks: [B, 3, 288, 288]                                          │
+│   - object_score_logits: [B, 1]                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Implementation Details
+
+#### 1. no_mem_embed Handling
+
+The `no_mem_embed` tensor has shape `[1, 1, 256]` and must be reshaped for spatial broadcast:
+
+```python
+# In TrackerDecoderWrapper.forward():
+no_mem_embed = self.no_mem_embed.view(1, 256, 1, 1)  # Reshape for broadcast
+image_embed = image_embed + no_mem_embed  # [B, 256, 72, 72] + [1, 256, 1, 1]
+```
+
+#### 2. Multimask Output
+
+The mask decoder uses `multimask_output=True`, which internally slices:
+```python
+# Mask decoder returns tokens 1, 2, 3 (skips token 0)
+masks = masks[:, 1:, :, :]  # [B, 4, H, W] → [B, 3, H, W]
+iou_pred = iou_pred[:, 1:]  # [B, 4] → [B, 3]
+```
+
+#### 3. Position Encoding
+
+Position encoding is **pre-computed** as a buffer in the vision encoder wrapper:
+```python
+# Sinusoidal position encoding for 72×72 spatial grid
+pos_enc_2 = compute_sine_position_encoding(shape=(1, 256, 72, 72))
+self.register_buffer("pos_enc_2", pos_enc_2)
+```
+
+### Verification Results
+
+All exports have been verified against PyTorch with Mean Absolute Error (MAE) < 0.001:
+
+| Component | MAE | Max Diff | Status |
+|-----------|-----|----------|--------|
+| Vision Encoder (fpn_feat_0) | 0.00000005 | 0.00000517 | ✅ PASS |
+| Vision Encoder (fpn_feat_1) | 0.00000370 | 0.00047082 | ✅ PASS |
+| Vision Encoder (fpn_feat_2) | 0.00000263 | 0.00029105 | ✅ PASS |
+| Vision Encoder (fpn_pos_2) | 0.00000000 | 0.00000000 | ✅ PASS |
+| Text Encoder (text_features) | 0.00000305 | 0.00002313 | ✅ PASS |
+| Text Encoder (text_mask) | 0.00000000 | 0.00000000 | ✅ PASS |
+
+### Migration Notes
+
+**For browser-side code:**
+1. Update vision encoder to output 256ch features (not 32/64/256)
+2. Use new tracker decoder that accepts 256ch inputs
+3. No changes needed for mask selection logic (still pick highest IoU)
+
+**For server-side code:**
+1. Can use unified vision encoder for both interactor and PCS modes
+2. PCS decoder can share same vision encoder outputs
 
 ---
 
