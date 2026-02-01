@@ -1,0 +1,10 @@
+{
+  "context_length": 32,
+  "vocab_size": 49408,
+  "pad_token": "<end_of_text>",
+  "pad_token_id": 49407,
+  "start_token": "<start_of_text>",
+  "start_token_id": 49406,
+  "end_token": "<end_of_text>",
+  "end_token_id": 49407
+}
