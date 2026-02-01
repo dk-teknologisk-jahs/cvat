@@ -12,7 +12,7 @@ The decoder runs in the browser using the ONNX decoder exported with mask refine
 
 Server returns three feature maps:
 - high_res_feats_0: [1, 32, 288, 288] - for fine details
-- high_res_feats_1: [1, 64, 144, 144] - for mid-level features  
+- high_res_feats_1: [1, 64, 144, 144] - for mid-level features
 - image_embed: [1, 256, 72, 72] - main embedding for the mask decoder
 
 Encoder options:

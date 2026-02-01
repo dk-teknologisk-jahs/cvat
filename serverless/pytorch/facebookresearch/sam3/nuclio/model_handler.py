@@ -55,7 +55,7 @@ class ModelHandler:
         self.image_size = 1008
         self.mean = np.array([0.5, 0.5, 0.5], dtype=np.float32)
         self.std = np.array([0.5, 0.5, 0.5], dtype=np.float32)
-        
+
         print(f"SAM3 ONNX encoder loaded: {model_path}")
         print(f"  Input: {self.input_name}")
         print(f"  Outputs: {self.output_names}")

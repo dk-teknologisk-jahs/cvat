@@ -35,7 +35,7 @@ The SAM3 vision encoder **cannot be exported to ONNX** due to `view_as_complex` 
        load_from_HF=True,  # Loads checkpoint from HuggingFace
        enable_inst_interactivity=True,  # Creates tracker with loaded weights
    )
-   
+
    # WRONG: build_tracker() does NOT load checkpoint weights!
    # from sam3.model_builder import build_tracker
    # tracker = build_tracker(...)  # Random weights, ~0.5 IoU, 90%+ mask coverage
@@ -66,7 +66,7 @@ The SAM3 vision encoder **cannot be exported to ONNX** due to `view_as_complex` 
      - point_labels: [B, N] FLOAT32 (1=positive, 0=negative)
      - mask_input: [B, 1, 288, 288] FLOAT32 (previous low_res_mask)
      - has_mask_input: [B] FLOAT32 (1.0 if using mask refinement)
-   
+
    Outputs:
      - masks: [B, 3, 1008, 1008] FLOAT32
      - iou_predictions: [B, 3] FLOAT32
