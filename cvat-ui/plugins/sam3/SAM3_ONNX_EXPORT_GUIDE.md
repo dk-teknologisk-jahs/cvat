@@ -1,6 +1,6 @@
 # SAM3 ONNX Export Guide
 
-This document describes SAM3 architecture and ONNX export strategies for CVAT integration.
+This document describes SAM3 architecture, ONNX export strategies, and how SAM3 covers **all three CVAT AI tool categories**: Interactor, Detector, and Tracker.
 
 > **Last Updated**: February 2026
 
@@ -8,10 +8,86 @@ This document describes SAM3 architecture and ONNX export strategies for CVAT in
 
 ## Table of Contents
 
-1. [SAM3 Architecture Overview](#sam3-architecture-overview)
-2. [Two Model Implementations](#two-model-implementations)
-3. [ONNX Export Methods](#onnx-export-methods)
-4. [Current Working Implementation](#current-working-implementation)
+1. [SAM3 Capabilities for CVAT](#sam3-capabilities-for-cvat)
+2. [SAM3 Architecture Overview](#sam3-architecture-overview)
+3. [Two Model Implementations](#two-model-implementations)
+4. [ONNX Export Methods](#onnx-export-methods)
+5. [Current Working Implementation](#current-working-implementation)
+
+---
+
+## SAM3 Capabilities for CVAT
+
+SAM3 is a **unified foundation model** that supports all three CVAT AI tool categories with a single model:
+
+### CVAT AI Tool Categories
+
+| Category | Description | SAM3 Mode | Status |
+|----------|-------------|-----------|--------|
+| **Interactor** | User clicks points/boxes → single mask | Sam3Tracker (PVS) | ✅ Implemented |
+| **Detector** | Model finds all instances of class(es) | SAM3 PCS | ✅ Implemented |
+| **Tracker** | Propagate masks across video frames | Sam3TrackerVideo | 🔄 Planned |
+
+### How SAM3 Modes Map to CVAT Tools
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     SAM3: ONE MODEL, THREE TOOLS                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  INTERACTOR (type: interactor)        │  Input: Image + clicks/box         │
+│  ════════════════════════════════     │  Output: Single mask for ONE object│
+│  Sam3Tracker / Sam3 (PVS mode)        │  Use: Interactive annotation       │
+│                                       │                                    │
+│  User clicks → mask appears           │  ┌─────┐  click   ┌──────────┐     │
+│  User refines → mask updates          │  │Image│ ───────► │ ONE mask │     │
+│                                       │  └─────┘          └──────────┘     │
+├───────────────────────────────────────┴────────────────────────────────────┤
+│                                                                             │
+│  DETECTOR (type: detector)            │  Input: Image + text prompt(s)     │
+│  ═════════════════════════════        │  Output: ALL matching instances    │
+│  SAM3 PCS mode                        │  Use: Auto-annotation by class     │
+│                                       │                                    │
+│  "person" → finds ALL people          │  ┌─────┐ "person" ┌──────────────┐ │
+│  "car, dog" → finds all cars & dogs   │  │Image│ ───────► │ N masks+boxes│ │
+│                                       │  └─────┘          └──────────────┘ │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  TRACKER (type: tracker)              │  Input: Video + initial mask/box   │
+│  ═════════════════════════════        │  Output: Masks for ALL frames      │
+│  Sam3TrackerVideo (PVS mode)          │  Use: Video object tracking        │
+│                                       │                                    │
+│  Frame 0: user annotates              │  ┌─────┐ mask_0   ┌──────────────┐ │
+│  Frame 1-N: auto-propagated           │  │Video│ ───────► │ N frame masks│ │
+│                                       │  └─────┘          └──────────────┘ │
+│                                                                             │
+│  BONUS: Text-based Tracking           │  "person" on video → track ALL     │
+│  SAM3 Video PCS mode                  │  people across all frames          │
+│                                       │                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### SAM3 Function Locations
+
+| Function | Path | Type | GPU VRAM |
+|----------|------|------|----------|
+| SAM3 Interactor (ONNX) | `serverless/onnx/facebookresearch/sam3/` | interactor | ~2GB |
+| SAM3 PCS (PyTorch) | `serverless/pytorch/facebookresearch/sam3-pcs/` | detector | ~3.5GB |
+| SAM3 Unified | `serverless/pytorch/facebookresearch/sam3-unified/` | interactor+detector | ~3.5GB |
+| SAM3 Tracker | `serverless/pytorch/facebookresearch/sam3-tracker/` | tracker | ~3.5GB |
+
+### Memory-Efficient Deployment
+
+To minimize GPU VRAM usage, use the **unified function** which loads the model once:
+
+```bash
+# Recommended: Single function for interactor + detector
+./serverless/deploy_gpu.sh serverless/pytorch/facebookresearch/sam3-unified
+
+# Or separate functions (higher VRAM, more isolation)
+./serverless/deploy_gpu.sh serverless/onnx/facebookresearch/sam3
+./serverless/deploy_gpu.sh serverless/pytorch/facebookresearch/sam3-pcs
+```
 
 ---
 
@@ -1325,3 +1401,526 @@ python export_v2.py --all --model-path facebook/sam3 --output-dir /tmp/sam3-onnx
 | **Text-to-Segment** | Full PyTorch | Full ONNX possible |
 
 For browser-side deployment or edge inference, the HuggingFace/usls ONNX models provide a complete solution.
+
+---
+
+## SAM3 Tracker Implementation Guide
+
+SAM3 includes powerful video tracking capabilities through its memory-based architecture. This section describes how to implement SAM3 tracking for CVAT.
+
+### Sam3TrackerVideo: Promptable Visual Segmentation on Videos
+
+The `Sam3TrackerVideo` class performs **Promptable Visual Segmentation (PVS)** on videos:
+- Takes interactive visual prompts (points, boxes, masks) on a **conditioning frame**
+- Tracks the **specific object instance** across all video frames
+- Uses **memory attention** to propagate information temporally
+
+```python
+from transformers import Sam3Model, Sam3Processor
+
+# Load model
+processor = Sam3Processor.from_pretrained("facebook/sam3")
+model = Sam3Model.from_pretrained("facebook/sam3").to("cuda")
+
+# Process video frames
+inputs = processor.images_to_sam3_tracker_video_inputs(video_frames)
+inputs = {k: v.to("cuda") for k, v in inputs.items()}
+
+# Initialize with a prompt on frame 0
+inference_session = model.init_sam3_tracker_video(inputs)
+
+# Add prompts to conditioning frame
+point_coords = torch.tensor([[[500, 375]]], device="cuda")  # [B, 1, 2]
+point_labels = torch.tensor([[1]], device="cuda")  # 1 = positive
+
+outputs_frame_0 = model(
+    inference_session=inference_session,
+    frame=inputs["pixel_values"][0],
+    point_coords=point_coords,
+    point_labels=point_labels,
+)
+
+# Propagate to all frames
+video_segments = model.propagate_in_video(
+    inference_session=inference_session,
+    start_frame_idx=0,
+    reverse=False,  # Forward propagation
+)
+
+# video_segments[frame_idx] contains {"masks": tensor, "scores": tensor}
+```
+
+### Memory Architecture
+
+SAM3 Tracker uses a sophisticated **memory bank** for temporal propagation:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       SAM3 TRACKER MEMORY SYSTEM                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Frame 0 (Conditioning)    Frame 1           Frame 2           Frame N     │
+│  ═══════════════════════   ═══════           ═══════           ═══════     │
+│                                                                             │
+│  ┌─────────────────┐      ┌─────────┐       ┌─────────┐       ┌─────────┐  │
+│  │  User Prompt    │      │  Auto   │       │  Auto   │       │  Auto   │  │
+│  │  (click/box)    │      │ Tracked │       │ Tracked │       │ Tracked │  │
+│  └────────┬────────┘      └────┬────┘       └────┬────┘       └────┬────┘  │
+│           │                    │                 │                 │        │
+│           ▼                    ▼                 ▼                 ▼        │
+│  ┌─────────────────┐      ┌─────────┐       ┌─────────┐       ┌─────────┐  │
+│  │ Encode Memory   │──────│ Memory  │───────│ Memory  │───────│ Memory  │  │
+│  │ (mask + feats)  │      │ Attn    │       │ Attn    │       │ Attn    │  │
+│  └─────────────────┘      └─────────┘       └─────────┘       └─────────┘  │
+│                                                                             │
+│  Memory Bank: Up to 7 frames (1 conditioning + 6 recent)                   │
+│  - maskmem_features: Spatial memory from predicted masks                    │
+│  - obj_ptr: Object pointer tokens for cross-attention                       │
+│  - maskmem_tpos_enc: Temporal position encoding                            │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Tracker Components
+
+| Component | Purpose | Shape |
+|-----------|---------|-------|
+| `maskmem_backbone` | Encode mask + features into memory | SimpleMaskEncoder |
+| `maskmem_features` | Spatial memory for attention | `[B, C, H, W]` |
+| `maskmem_tpos_enc` | Temporal position encoding | `[num_maskmem, 1, 1, mem_dim]` |
+| `obj_ptr` | Object pointer token | `[B, hidden_dim]` |
+| `no_mem_embed` | "No memory" indicator | `[1, 1, hidden_dim]` |
+| `no_obj_ptr` | "Object not present" indicator | `[1, hidden_dim]` |
+
+### CVAT Tracker Interface
+
+CVAT trackers follow a specific request/response protocol. Here's how SAM3 Tracker should implement it:
+
+```python
+# Request format (from CVAT)
+{
+    "image": "<base64-encoded-frame>",
+    "shapes": [
+        [xtl, ytl, xbr, ybr],  # Bounding box for each object
+        ...
+    ],
+    "states": [
+        {"<state_key>": "<encoded_value>", ...},  # Tracker state per object
+        ...
+    ]
+}
+
+# Response format (to CVAT)
+{
+    "shapes": [
+        [xtl, ytl, xbr, ybr],  # Updated box or polygon points
+        ...
+    ],
+    "states": [
+        {"<state_key>": "<encoded_value>", ...},  # Updated state per object
+        ...
+    ]
+}
+```
+
+### Implementing SAM3 Tracker for CVAT
+
+```python
+# model_handler_tracker.py
+
+import torch
+import jsonpickle
+from sam3 import build_sam3_video_predictor
+
+class SAM3TrackerHandler:
+    def __init__(self):
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.predictor = build_sam3_video_predictor("sam3.pt", device=self.device)
+
+    def encode_state(self, inference_state):
+        """Encode inference state for storage between frames."""
+        state = {
+            'obj_ids': jsonpickle.encode(inference_state.get('obj_ids', [])),
+            'obj_ptr': jsonpickle.encode(inference_state.get('obj_ptr')),
+            'maskmem_features': jsonpickle.encode(inference_state.get('maskmem_features')),
+        }
+        return state
+
+    def decode_state(self, state):
+        """Decode stored state for continuing tracking."""
+        return {
+            'obj_ids': jsonpickle.decode(state['obj_ids']),
+            'obj_ptr': jsonpickle.decode(state['obj_ptr']),
+            'maskmem_features': jsonpickle.decode(state['maskmem_features']),
+        }
+
+    def init_tracker(self, image, bbox):
+        """Initialize tracking on first frame with bounding box."""
+        xtl, ytl, xbr, ybr = bbox
+        box = torch.tensor([[xtl, ytl, xbr, ybr]], device=self.device)
+
+        inference_state = self.predictor.init_state(image)
+        frame_idx, obj_ids, masks = self.predictor.add_new_points_or_box(
+            inference_state=inference_state,
+            frame_idx=0,
+            obj_id=1,
+            box=box,
+        )
+        return inference_state, masks[0]
+
+    def track(self, image, state):
+        """Track object in new frame using stored state."""
+        inference_state = self.decode_state(state)
+
+        for frame_idx, obj_ids, masks in self.predictor.propagate_in_video(inference_state):
+            mask = masks[0] > 0
+            if mask.any():
+                ys, xs = torch.where(mask)
+                bbox = [xs.min().item(), ys.min().item(),
+                        xs.max().item(), ys.max().item()]
+            else:
+                bbox = None
+
+        return bbox, self.encode_state(inference_state)
+
+    def infer(self, image, shape, state):
+        """Main entry point matching CVAT tracker interface."""
+        if state is None:
+            inference_state, mask = self.init_tracker(image, shape)
+            bbox = self._mask_to_bbox(mask)
+            state = self.encode_state(inference_state)
+        else:
+            bbox, state = self.track(image, state)
+
+        return bbox, state
+```
+
+### SAM3 Video PCS: Text-Based Video Detection + Tracking
+
+SAM3 also supports **text-based tracking** via the PCS Video mode:
+
+```python
+# Track "person" across entire video
+processor = Sam3Processor.from_pretrained("facebook/sam3")
+model = Sam3Model.from_pretrained("facebook/sam3")
+
+# Process video
+inputs = processor.images_to_sam3_video_inputs(video_frames)
+inputs["input_text"] = [["person"]]  # Text prompt
+
+# Run PCS on video - detects + tracks all people
+outputs = model.forward_sam3_video(**inputs)
+
+# outputs contains masks for all detected people in all frames
+for frame_idx, frame_output in enumerate(outputs.masks):
+    print(f"Frame {frame_idx}: {frame_output.shape[0]} people detected")
+```
+
+### Tracker Function YAML Template
+
+```yaml
+# serverless/pytorch/facebookresearch/sam3-tracker/nuclio/function-gpu.yaml
+metadata:
+  name: pth-facebookresearch-sam3-tracker
+  namespace: cvat
+  annotations:
+    name: SAM3 Tracker
+    version: 1
+    type: tracker
+    spec:
+    help_message: |
+      SAM3 Video Tracker for propagating masks across video frames.
+      Initialize with a bounding box on the first frame.
+
+spec:
+  description: Video object tracking with SAM3 memory-based propagation
+  runtime: 'python:3.10'
+  handler: main:handler
+  eventTimeout: 30s
+
+  build:
+    image: cvat.pth.facebookresearch.sam3.tracker:latest-gpu
+    baseImage: nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+    directives:
+      preCopy:
+        - kind: RUN
+          value: pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+        - kind: RUN
+          value: pip3 install git+https://github.com/facebookresearch/sam3.git
+        - kind: RUN
+          value: pip3 install jsonpickle numpy pillow
+
+  triggers:
+    myHttpTrigger:
+      numWorkers: 2
+      kind: 'http'
+
+  resources:
+    limits:
+      nvidia.com/gpu: 1
+```
+
+### Comparison: SAM3 Tracker vs Existing CVAT Trackers
+
+| Feature | SiamMask | TransT | SAM3 Tracker |
+|---------|----------|--------|--------------|
+| Output | Polygon | Box | Mask + Box |
+| Occlusion handling | Limited | Limited | Object score |
+| Re-detection | No | No | Memory attention |
+| Multiple objects | Separate state | Separate state | Shared memory |
+| Text prompts | No | No | Yes (PCS mode) |
+| Speed (FPS) | ~55 | ~50 | ~44 |
+| Model size | ~100MB | ~50MB | ~3.5GB |
+
+---
+
+## Summary: SAM3 Coverage of CVAT AI Tools
+
+SAM3 is the first model to cover **all three CVAT AI tool categories** with a single architecture:
+
+| Tool Type | SAM3 Mode | Implementation Status | Function Path |
+|-----------|-----------|----------------------|---------------|
+| **Interactor** | Sam3Tracker (PVS) | ✅ Complete | `onnx/.../sam3/` or `pytorch/.../sam3-unified/` |
+| **Detector** | SAM3 PCS | ✅ Complete | `pytorch/.../sam3-pcs/` or `pytorch/.../sam3-unified/` |
+| **Tracker** | Sam3TrackerVideo | 🔄 Planned | `pytorch/.../sam3-tracker/` |
+
+### Recommended Deployment Strategy
+
+For **memory-efficient** deployment with all three capabilities:
+
+```bash
+# Option 1: Unified function for interactor + detector (recommended)
+./serverless/deploy_gpu.sh serverless/pytorch/facebookresearch/sam3-unified
+# Plus separate tracker (video requires different state management)
+./serverless/deploy_gpu.sh serverless/pytorch/facebookresearch/sam3-tracker
+
+# Option 2: Separate functions (more isolation, higher VRAM)
+./serverless/deploy_gpu.sh serverless/onnx/facebookresearch/sam3          # interactor
+./serverless/deploy_gpu.sh serverless/pytorch/facebookresearch/sam3-pcs    # detector
+./serverless/deploy_gpu.sh serverless/pytorch/facebookresearch/sam3-tracker # tracker
+```
+
+
+---
+
+## Session Notes: Key Discoveries & Resources
+
+This section documents important discoveries, cleared misunderstandings, and reference resources from development sessions.
+
+### Reference Implementations (Git Cloned)
+
+The following repositories have been cloned locally for reference:
+
+| Repository | Local Path | Purpose |
+|------------|------------|---------|
+| `facebookresearch/sam3` | `/home/jahs/GitHub/cvat/sam3/` | Official SAM3 PyTorch implementation (vision encoder can't export to ONNX) |
+| `jamjamjon/usls` | `/home/jahs/GitHub/cvat/usls/` | Rust ONNX runtime with SAM3 export scripts (uses HuggingFace) |
+| `mvaldi/cvat-yoloe-sam` | `/home/jahs/GitHub/cvat/cvat-yoloe-sam/` | Reference CVAT fork with YOLOE + SAM integration |
+| `cvat-ai/cvat` | `/home/jahs/GitHub/cvat/` | Main CVAT repository (current workspace) |
+
+**Note**: The `sam3/` and `usls/` directories are cloned **inside** the cvat workspace for convenience.
+
+#### Repository Details
+
+**facebookresearch/sam3** (Official SAM3):
+```bash
+cd /home/jahs/GitHub/cvat/sam3
+git remote -v  # origin: https://github.com/facebookresearch/sam3
+```
+- Contains official PyTorch model code
+- **Cannot export vision encoder to ONNX** due to `torch.view_as_complex()` in RoPE
+- Use for reference and PyTorch-based inference only
+
+**jamjamjon/usls** (Rust ONNX Runtime + Export Scripts):
+```bash
+cd /home/jahs/GitHub/cvat/usls
+git remote -v  # origin: https://github.com/jamjamjon/usls.git
+```
+- Contains Python export scripts at `scripts/sam3-image/export_v2.py`
+- Uses HuggingFace Transformers (which CAN export vision encoder)
+- **Use this for ONNX export**
+
+**mvaldi/cvat-yoloe-sam** (Reference Implementation):
+```bash
+cd /home/jahs/GitHub/cvat/cvat-yoloe-sam
+git remote -v  # origin: https://github.com/mvaldi/cvat-yoloe-sam.git
+                # upstream: https://github.com/cvat-ai/cvat.git
+```
+- CVAT fork with YOLOE + SAM integration example
+- Useful reference for serverless function patterns
+- Has `ai-models/` directory with model configurations
+
+### Key Discovery: Two SAM3 Implementations
+
+**Critical finding**: There are TWO different SAM3 implementations with different ONNX export capabilities:
+
+| Implementation | Location | Vision Encoder ONNX | Why |
+|----------------|----------|---------------------|-----|
+| **Official Facebook** | `pip install git+https://github.com/facebookresearch/sam3.git` | ❌ **Cannot export** | Uses `torch.view_as_complex()` in RoPE |
+| **HuggingFace Transformers** | `from transformers import Sam3Model` | ✅ **Can export** | Uses pre-computed RoPE buffers |
+
+**The problematic code in official SAM3:**
+```python
+# sam3/model/image_encoder/image_encoder.py (Official Facebook)
+freqs_cis = torch.view_as_complex(freqs_cis)  # ❌ ONNX doesn't support this
+```
+
+**The fixed code in HuggingFace:**
+```python
+# transformers/models/sam3/modeling_sam3.py (HuggingFace)
+class Sam3ViTRotaryEmbedding(nn.Module):
+    def __init__(self, config):
+        # Pre-compute during __init__, no view_as_complex at forward time
+        self.register_buffer("rope_embeddings_cos", inv_freq.cos())
+        self.register_buffer("rope_embeddings_sin", inv_freq.sin())
+```
+
+### Working ONNX Export Method
+
+**Use the `usls` export scripts with HuggingFace Transformers:**
+
+```bash
+cd ~/GitHub/usls/scripts/sam3-image
+python export_v2.py --all --model-path facebook/sam3 --output-dir /tmp/sam3-onnx
+
+# Successfully exports:
+# - vision-encoder.onnx  (~1.8 GB)
+# - text-encoder.onnx    (~1.4 GB)
+# - decoder.onnx         (~124 MB)
+```
+
+**Prerequisites:**
+- HuggingFace account with access to gated `facebook/sam3` model
+- `huggingface-cli login` completed
+- `pip install transformers>=5.0.0`
+
+### Cleared Misunderstandings
+
+#### 1. "SAM3 vision encoder can be exported to ONNX"
+**Wrong**: Only HuggingFace Transformers version can. Official Facebook repo cannot due to `view_as_complex()`.
+
+#### 2. "onnx-community/sam3-tracker-ONNX has all models"
+**Partially correct**: It has vision encoder and decoder, but uses different input/output names than usls exports. Always verify tensor names match your code.
+
+#### 3. "PCS decoder can be easily exported to ONNX"
+**Wrong**: The PCS decoder is complex with:
+- Tight coupling between encoder/decoder components
+- Dynamic control flow for prompt types
+- Geometry encoder that expects non-empty inputs during tracing
+
+**Solution**: Keep PCS decoder in PyTorch on server. It's acceptable since text prompts aren't interactive like clicks.
+
+#### 4. "SAM2 and SAM3 have the same architecture"
+**Wrong**: Key differences:
+| Parameter | SAM2 | SAM3 |
+|-----------|------|------|
+| Input image size | 1024×1024 | 1008×1008 |
+| Backbone stride | 16 | 14 |
+| Embedding size | 64×64 | 72×72 |
+| Low-res mask size | 256×256 | 288×288 |
+| Text encoder | None | CLIP (354M params) |
+
+#### 5. "The 8 SAM3 components share parameters"
+**Wrong**: All 8 components are **completely independent** with no parameter sharing:
+- Vision Encoder (454M) - standalone
+- Text Encoder (354M) - standalone
+- Geometry Encoder (8M) - standalone
+- DETR Encoder (10M) - standalone
+- DETR Decoder (12M) - standalone
+- Mask Decoder (2M) - standalone
+- Scoring Head (1M) - standalone
+- Box Head (~0.5M) - standalone
+
+### Important File Locations
+
+#### CVAT SAM3 Functions
+```
+serverless/
+├── onnx/facebookresearch/sam3/nuclio/          # ONNX interactor
+├── pytorch/facebookresearch/sam3/nuclio/       # Original PyTorch (legacy)
+├── pytorch/facebookresearch/sam3-pcs/nuclio/   # Text-to-segment detector
+├── pytorch/facebookresearch/sam3-unified/nuclio/ # Combined interactor+detector
+└── pytorch/facebookresearch/sam3-tracker/nuclio/ # Video tracker (planned)
+```
+
+#### usls Export Scripts (inside cvat workspace)
+```
+/home/jahs/GitHub/cvat/usls/scripts/sam3-image/
+├── export_v2.py          # Main export script (use this)
+├── export.py             # Older version
+└── README.md             # Documentation
+```
+
+#### Official SAM3 Model Code (inside cvat workspace)
+```
+/home/jahs/GitHub/cvat/sam3/sam3/
+├── model/
+│   ├── sam3_tracker_base.py    # Video tracking with memory
+│   ├── sam1_task_predictor.py  # Image segmentation
+│   ├── image_encoder/          # ViT backbone (has view_as_complex issue)
+│   └── memory.py               # Memory encoder for tracking
+└── sam/
+    ├── mask_decoder.py         # SAM-style mask decoder
+    └── prompt_encoder.py       # Point/box prompt encoder
+```
+
+#### Reference Implementation (cvat-yoloe-sam)
+```
+/home/jahs/GitHub/cvat/cvat-yoloe-sam/
+├── ai-models/                  # Model configurations
+├── serverless/                 # Nuclio function examples
+├── cvat-ui/                    # UI modifications for YOLOE+SAM
+└── zup.sh, zdown.sh            # Helper scripts for docker compose
+```
+
+### Conda Environment
+
+For SAM3 development, use:
+```bash
+conda activate grimme-tf2.18  # Has transformers, torch, onnx, etc.
+```
+
+### HuggingFace Model Access
+
+The `facebook/sam3` model is **gated**. To access:
+1. Go to https://huggingface.co/facebook/sam3
+2. Accept the license agreement
+3. Run `huggingface-cli login` with your token
+
+**Important**: Once models are exported to ONNX or baked into Docker images, no HuggingFace auth is needed at runtime.
+
+### GitHub Issue Reference
+
+- **GitHub Issue #224**: Discusses ONNX export challenges
+- Key insight from issue: Use HuggingFace Transformers implementation for ONNX export
+
+### API Differences: usls vs HuggingFace ONNX Models
+
+The usls-exported models have different tensor names than onnx-community models:
+
+**usls decoder inputs:**
+```
+input_points: [batch, 1, num_points, 2]
+input_labels: [batch, 1, num_points]
+input_boxes: [batch, num_boxes, 4]
+image_embeddings.0: [batch, 32, 288, 288]
+image_embeddings.1: [batch, 64, 144, 144]
+image_embeddings.2: [batch, 256, 72, 72]
+```
+
+**usls decoder outputs:**
+```
+iou_scores: [batch, num_prompts, 3]
+pred_masks: [batch, num_prompts, 3, 288, 288]
+object_score_logits: [batch, num_prompts, 1]
+```
+
+### Version Information
+
+Verified working versions as of February 2026:
+- Python: 3.10+
+- PyTorch: 2.x with CUDA 12.1
+- Transformers: 5.0.0+
+- ONNX: 1.14+
+- ONNX Runtime: 1.16+
+
