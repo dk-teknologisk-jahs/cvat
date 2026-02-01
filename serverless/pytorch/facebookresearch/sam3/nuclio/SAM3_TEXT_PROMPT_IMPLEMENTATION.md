@@ -328,34 +328,56 @@ Fixed `bpe()` function to match SimpleTokenizer: `word = tuple(token[:-1]) + (to
    - Masks should have labels matching the text prompts
    - For new labels, CVAT may need to create them or warn
 
-### Architecture Summary
+### 2026-02-01 - ONNX Export Analysis
+
+**Goal:** Export all SAM3 components to ONNX to avoid gated HuggingFace weights at runtime.
+
+**Components analyzed:**
+
+| Component | Size | Status | Notes |
+|-----------|------|--------|-------|
+| vision_encoder.onnx | ~1.7 GB | ✅ Available | onnx-community/sam3-tracker-ONNX |
+| text_encoder.onnx | 1348 MB | ✅ Exported | Our own export, verified |
+| pcs_decoder.onnx | 124 MB | ⚠️ Partial | Export succeeds but runtime issues |
+
+**PCS Decoder Export Issue:**
+
+Successfully exported `pcs_decoder.onnx` (124 MB), but ONNX runtime fails because:
+- Empty geometry prompt `[0, B, 4]` is baked in as constant during tracing
+- Later reshape operations expect non-zero dimensions
+
+**Key Architecture Insight:**
+
+SAM3 uses `num_feature_levels=1`, meaning:
+- Transformer encoder ONLY uses the LAST FPN level (72×72)
+- But segmentation head uses ALL FPN levels (288², 144², 72²) for upsampling
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        CVAT UI                               │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │ detector-runner.tsx                                 │    │
-│  │ - Shows text prompt input when supportsTextPrompt   │    │
-│  │ - Splits comma-separated prompts into array         │    │
-│  │ - Sends text_prompts[] + threshold to backend       │    │
-│  └─────────────────────────────────────────────────────┘    │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ POST /api/lambda/functions/{id}
-                               │ { text_prompts: ["person", "car"], threshold: 0.5 }
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      CVAT Backend                            │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │ views.py                                            │    │
-│  │ - Parses supports_text_prompt annotation            │    │
-│  │ - Skips label mapping for text-based detection      │    │
-│  │ - Passes text_prompts to Nuclio function            │    │
-│  │ - Returns DetectedShape[] directly to UI            │    │
-│  └─────────────────────────────────────────────────────┘    │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ Nuclio invoke
-                               │ { image, text_prompts, threshold }
-                               ▼
+backbone_fpn[3 levels] ──┬──> [last level only] ──> Transformer Encoder ──> Transformer Decoder
+                        │
+                        └──> [all levels] ─────────────────────────────────> Segmentation Head
+```
+
+**Options to fix ONNX:**
+
+1. **Text-only wrapper** - Skip geometry encoder entirely (loses box guidance)
+2. **Dummy geometry** - Trace with valid dummy box, mask at inference
+3. **Component export** - Export transformer/seghead separately
+4. **Unified PyTorch** - Single function handles both modes
+
+**Recommended approach: Unified PyTorch Handler**
+
+Instead of duplicating model loading in two Nuclio functions, create ONE function that:
+1. Loads SAM3 model once (with all components)
+2. Handles `/encode` for interactor mode (returns embeddings for browser decode)
+3. Handles `/text-to-segment` for detector mode (returns masks directly)
+4. Gated HuggingFace weights only needed at Docker BUILD time (cached in image)
+
+This approach:
+- ✅ Avoids duplicate GPU memory usage
+- ✅ Single deployment to manage
+- ✅ Weights embedded in Docker image (no runtime auth needed)
+- ✅ Can still use ONNX vision encoder for interactor mode
 ┌─────────────────────────────────────────────────────────────┐
 │                    Nuclio Function                           │
 │  ┌─────────────────────────────────────────────────────┐    │
