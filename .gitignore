@@ -69,3 +69,8 @@ cvat-ui/dist
 /sam3/
 /usls/
 /cvat-yoloe-sam/
+
+# SAM3 serverless test outputs and artifacts
+serverless/**/test_output/
+serverless/**/*.png
+serverless/**/*.jpg
