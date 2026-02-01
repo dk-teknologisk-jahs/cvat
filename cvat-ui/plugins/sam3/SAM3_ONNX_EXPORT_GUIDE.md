@@ -26,6 +26,13 @@ This document describes SAM3 architecture, ONNX export strategies, and how SAM3 
 
 We are migrating from a hybrid approach (external vision encoder + custom decoder) to **fully self-controlled ONNX exports** from HuggingFace Transformers.
 
+**⚠️ CRITICAL: The official SAM3 weights are GATED on HuggingFace!**
+
+This means:
+- ❌ Cannot use HuggingFace Transformers directly at runtime (requires auth)
+- ✅ Must export to ONNX once (requires auth), then use ONNX Runtime at runtime (no auth)
+- ✅ ONNX models can be baked into Docker images for deployment
+
 #### ✅ Completed
 
 | Component | Status | Notes |
@@ -36,29 +43,30 @@ We are migrating from a hybrid approach (external vision encoder + custom decode
 | **PCS Decoder** | ✅ Exported | 123 MB, DETR encoder/decoder + heads |
 | **Export Script** | ✅ Created | `serverless/pytorch/facebookresearch/sam3/nuclio/export_hf_onnx.py` |
 | **Verification Tests** | ✅ Passed | MAE < 0.001 for all components |
-| **Unified Nuclio Function** | ✅ Implemented | `sam3-unified/nuclio/` with video tracking |
+| **Unified ONNX Function** | ✅ Implemented | `serverless/onnx/facebookresearch/sam3/nuclio/` |
 | **Redis State Management** | ✅ Implemented | Video tracking session state in Redis |
-| **HuggingFace Integration** | ✅ Implemented | Sam3Model, Sam3TrackerModel, Sam3VideoModel |
 
 #### 🔄 In Progress
 
 | Task | Status | Notes |
 |------|--------|-------|
+| ONNX model hosting | 🔄 Pending | Host exported models for Docker build |
 | Browser integration | 🔄 Pending | Update to use 256ch vision encoder outputs |
 | End-to-end testing | 🔄 Pending | Test full pipeline with real images |
-| Model deployment | 🔄 Pending | Copy ONNX files to appropriate locations |
 
 #### Key Findings
 
-1. **Previous Issue**: External `onnx-community/sam3-tracker-ONNX` vision encoder had projections baked in (outputs 32/64/256ch), while PCS mode expects 256/256/256ch.
+1. **Gated Models**: The `facebook/sam3-hiera-large` model is gated. HuggingFace Transformers cannot be used at runtime without auth. **Solution**: Export to ONNX, deploy ONNX models.
 
-2. **Solution**: Single vision encoder outputs 256ch at all FPN levels. The tracker decoder includes conv_s0/conv_s1 projections internally.
+2. **Previous Issue**: External `onnx-community/sam3-tracker-ONNX` vision encoder had projections baked in (outputs 32/64/256ch), while PCS mode expects 256/256/256ch.
 
-3. **no_mem_embed Fix**: Shape is `[1, 1, 256]`, must be reshaped to `[1, 256, 1, 1]` for spatial broadcast.
+3. **Solution**: Single vision encoder outputs 256ch at all FPN levels. The tracker decoder includes conv_s0/conv_s1 projections internally.
 
-4. **Multimask Output**: Mask decoder with `multimask_output=True` already slices internally - no additional slicing needed.
+4. **no_mem_embed Fix**: Shape is `[1, 1, 256]`, must be reshaped to `[1, 256, 1, 1]` for spatial broadcast.
 
-5. **CVAT Tracker Interface**: Existing trackers (SiamMask, TransT) use stateless per-request pattern with jsonpickle-serialized state. SAM3 video tracking memory bank is too large for this approach - use Redis instead.
+5. **Multimask Output**: Mask decoder with `multimask_output=True` already slices internally - no additional slicing needed.
+
+6. **CVAT Tracker Interface**: Existing trackers (SiamMask, TransT) use stateless per-request pattern with jsonpickle-serialized state. SAM3 video tracking memory bank is too large for this approach - use Redis instead.
 
 #### Verification Results
 
@@ -229,16 +237,22 @@ Official Facebook SAM3 PyTorch implementation.
 
 **⚠️ Important**: Cannot export vision encoder to ONNX due to `torch.view_as_complex()` in RoPE. Use HuggingFace Transformers implementation instead.
 
-### Implemented: sam3-unified Nuclio Function
+### Implemented: sam3-unified ONNX Nuclio Function
 
-**Location**: `serverless/pytorch/facebookresearch/sam3-unified/nuclio/`
+**Location**: `serverless/onnx/facebookresearch/sam3/nuclio/`
 
-This is the **unified SAM3 function** that combines all three CVAT AI tool types into a single nuclio deployment.
+This is the **unified SAM3 ONNX function** that combines all three CVAT AI tool types using ONNX Runtime - **NO HuggingFace auth needed at runtime!**
 
 **Files**:
-- `model_handler_unified.py` - HuggingFace model handler with Redis state management
-- `main.py` - Request routing by `mode` parameter
-- `function-gpu.yaml` - Nuclio configuration with Redis environment variables
+- `model_handler_unified.py` - ONNX Runtime handler with lazy model loading
+- `main_unified.py` - Request routing by `mode` parameter
+- `function-gpu-unified.yaml` - Nuclio configuration
+
+**Why ONNX?**
+- The `facebook/sam3-hiera-large` model is **gated** on HuggingFace
+- HuggingFace Transformers requires authentication to load the model
+- ONNX models can be exported once (requires auth) then deployed without auth
+- ONNX Runtime is faster and more portable than PyTorch
 
 **Supported Modes**:
 ```python
@@ -251,11 +265,13 @@ mode="track/clear"      # Tracker: Clear session
 mode="info"             # Get model information
 ```
 
-**HuggingFace Models (Lazy Loaded)**:
-```python
-from transformers import Sam3Model, Sam3Processor           # PCS (Detector)
-from transformers import Sam3TrackerModel, Sam3TrackerProcessor  # PVS (Interactor)
-from transformers import Sam3VideoModel, Sam3VideoProcessor      # Video Tracker
+**ONNX Models Required** (export via `export_hf_onnx.py`):
+```
+/opt/nuclio/sam3/models/
+├── vision_encoder.onnx      # 1.8 GB - 256ch at all FPN levels
+├── text_encoder.onnx        # 1.3 GB - CLIP text encoding
+├── pcs_decoder.onnx         # 123 MB - DETR decoder for PCS
+└── tracker_decoder.onnx     # 16 MB - mask decoder with projections
 ```
 
 **Video Tracking State Management**:
@@ -272,11 +288,14 @@ states = [{"session_id": "sam3_track_abc123", "object_id": 1}]
 
 **Environment Variables**:
 ```yaml
-- HF_TOKEN        # HuggingFace token for gated models (optional)
-- REDIS_HOST      # Redis server host (default: cvat_redis)
-- REDIS_PORT      # Redis server port (default: 6379)
-- REDIS_PASSWORD  # Redis password (optional)
-- REDIS_TTL       # Session TTL in seconds (default: 3600)
+- SAM3_MODEL_DIR      # Directory containing ONNX models
+- SAM3_VISION_ENCODER # Path to vision_encoder.onnx
+- SAM3_TEXT_ENCODER   # Path to text_encoder.onnx
+- SAM3_PCS_DECODER    # Path to pcs_decoder.onnx
+- SAM3_TRACKER_DECODER # Path to tracker_decoder.onnx
+- REDIS_HOST          # Redis server host (default: cvat_redis)
+- REDIS_PORT          # Redis server port (default: 6379)
+- REDIS_TTL           # Session TTL in seconds (default: 3600)
 ```
 
 ---
