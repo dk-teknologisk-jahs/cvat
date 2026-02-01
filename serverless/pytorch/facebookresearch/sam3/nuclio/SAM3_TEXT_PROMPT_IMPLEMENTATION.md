@@ -312,7 +312,7 @@ Fixed `bpe()` function to match SimpleTokenizer: `word = tuple(token[:-1]) + (to
    ```bash
    # Frontend
    cd cvat-ui && yarn build
-   
+
    # Backend has Python changes - restart server
    ```
 

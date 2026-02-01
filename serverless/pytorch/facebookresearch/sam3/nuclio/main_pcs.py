@@ -59,12 +59,12 @@ def init_context(context):
 def mask_to_cvat_rle(mask: np.ndarray) -> List[int]:
     """
     Convert binary mask to CVAT RLE format.
-    
+
     CVAT RLE format: [rle_counts..., xtl, ytl, xbr, ybr]
-    
+
     Args:
         mask: np.ndarray [H, W] boolean or uint8 binary mask
-    
+
     Returns:
         List of integers: RLE counts followed by bounding box
     """
@@ -74,29 +74,29 @@ def mask_to_cvat_rle(mask: np.ndarray) -> List[int]:
     if not rows.any() or not cols.any():
         # Empty mask
         return [0, 0, 0, 0]
-    
+
     y_min, y_max = np.where(rows)[0][[0, -1]]
     x_min, x_max = np.where(cols)[0][[0, -1]]
-    
+
     # Convert to CVAT format (xtl, ytl, xbr, ybr)
     xtl, ytl = int(x_min), int(y_min)
     xbr, ybr = int(x_max) + 1, int(y_max) + 1
-    
+
     # Crop mask to bounding box
     cropped = mask[ytl:ybr, xtl:xbr]
-    
+
     # Flatten in row-major (C) order
     flat = cropped.flatten().astype(np.uint8)
-    
+
     # Encode as RLE (run-length encoding)
     # CVAT format: starts with count of 0s, then alternates
     rle = []
     if len(flat) == 0:
         return [0, 0, 0, 0]
-    
+
     current_val = 0  # Start counting 0s first
     count = 0
-    
+
     for val in flat:
         if val == current_val:
             count += 1
@@ -105,24 +105,24 @@ def mask_to_cvat_rle(mask: np.ndarray) -> List[int]:
             count = 1
             current_val = val
     rle.append(count)
-    
+
     # Append bounding box
     rle.extend([xtl, ytl, xbr, ybr])
-    
+
     return rle
 
 
 def handler(context, event):
     """
     Handle text-to-segment requests.
-    
+
     Expected input (from CVAT detector runner):
     {
         "image": "<base64 encoded image>",
         "text_prompts": ["a person", "a car"],
         "threshold": 0.3,  # Optional confidence threshold
     }
-    
+
     Returns (CVAT detector format - flat array):
     [
         {
@@ -178,7 +178,7 @@ def handler(context, event):
             response.append(detection)
 
         context.logger.info(f"SAM3-PCS returning {len(response)} detections")
-        
+
         return context.Response(
             body=json.dumps(response),
             headers={},
