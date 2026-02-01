@@ -43,7 +43,7 @@ This means:
 | **PCS Decoder** | ✅ Exported | 123 MB, DETR encoder/decoder + heads |
 | **Export Script** | ✅ Created | `serverless/pytorch/facebookresearch/sam3/nuclio/export_hf_onnx.py` |
 | **Verification Tests** | ✅ Passed | MAE < 0.001 for all components |
-| **Unified ONNX Function** | ✅ Implemented | `serverless/onnx/facebookresearch/sam3/nuclio/` |
+| **Unified ONNX Function** | ✅ Implemented | `serverless/onnx/facebookresearch/sam3-unified/nuclio/` |
 | **Redis State Management** | ✅ Implemented | Video tracking session state in Redis |
 
 #### 🔄 In Progress
@@ -239,7 +239,7 @@ Official Facebook SAM3 PyTorch implementation.
 
 ### Implemented: sam3-unified ONNX Nuclio Function
 
-**Location**: `serverless/onnx/facebookresearch/sam3/nuclio/`
+**Location**: `serverless/onnx/facebookresearch/sam3-unified/nuclio/`
 
 This is the **unified SAM3 ONNX function** that combines all three CVAT AI tool types using ONNX Runtime - **NO HuggingFace auth needed at runtime!**
 

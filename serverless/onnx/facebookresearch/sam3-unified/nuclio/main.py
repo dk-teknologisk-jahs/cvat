@@ -32,7 +32,7 @@ from typing import Any, Dict, List
 import numpy as np
 from PIL import Image
 
-from model_handler_unified import get_handler
+from model_handler import get_handler
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

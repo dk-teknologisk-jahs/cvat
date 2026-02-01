@@ -47,7 +47,7 @@ metadata:
 spec:
   description: Unified SAM3 using ONNX Runtime - Interactor + Detector + Tracker
   runtime: 'python:3.10'
-  handler: main_unified:handler
+  handler: main:handler
   eventTimeout: 120s
 
   env:

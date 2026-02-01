@@ -1,0 +1,100 @@
+# Copyright (C) 2024-2026 CVAT.ai Corporation
+#
+# SPDX-License-Identifier: MIT
+
+# =============================================================================
+# SAM3 Unified ONNX Function (CPU)
+# =============================================================================
+#
+# CPU version of the unified SAM3 function.
+# For GPU version, see function-gpu.yaml
+#
+# IMPORTANT: Uses ONNX Runtime - NO HUGGINGFACE AUTH NEEDED AT RUNTIME!
+#
+# =============================================================================
+
+metadata:
+  name: onnx-facebookresearch-sam3-unified
+  namespace: cvat
+  annotations:
+    name: SAM3 Unified (ONNX)
+    version: 1
+    type: interactor
+    spec:
+    min_pos_points: 0
+    min_neg_points: 0
+    startswith_box_optional: true
+    framework: onnx
+    supports_text_prompt: true
+    help_message: |
+      SAM3 Unified - Interactor + Detector + Tracker in one function.
+      Uses ONNX Runtime (no HuggingFace auth needed at runtime).
+      CPU version - slower than GPU but no CUDA required.
+
+spec:
+  description: Unified SAM3 using ONNX Runtime (CPU) - Interactor + Detector + Tracker
+  runtime: 'python:3.10'
+  handler: main:handler
+  eventTimeout: 300s  # Longer timeout for CPU
+
+  env:
+    - name: PYTHONPATH
+      value: /opt/nuclio/sam3
+    - name: SAM3_MODEL_DIR
+      value: /opt/nuclio/sam3/models
+    - name: SAM3_VISION_ENCODER
+      value: /opt/nuclio/sam3/models/vision_encoder.onnx
+    - name: SAM3_TEXT_ENCODER
+      value: /opt/nuclio/sam3/models/text_encoder.onnx
+    - name: SAM3_PCS_DECODER
+      value: /opt/nuclio/sam3/models/pcs_decoder.onnx
+    - name: SAM3_TRACKER_DECODER
+      value: /opt/nuclio/sam3/models/tracker_decoder.onnx
+    - name: REDIS_HOST
+      value: cvat_redis
+    - name: REDIS_PORT
+      value: "6379"
+    - name: REDIS_PASSWORD
+      value: ""
+    - name: REDIS_TTL
+      value: "3600"
+
+  build:
+    image: cvat.onnx.facebookresearch.sam3.unified:latest-cpu
+    baseImage: python:3.10-slim
+
+    directives:
+      preCopy:
+      # Disable interactive frontend
+        - kind: ENV
+          value: DEBIAN_FRONTEND=noninteractive
+      # Set workdir
+        - kind: WORKDIR
+          value: /opt/nuclio/sam3
+      # Install system dependencies
+        - kind: RUN
+          value: |
+            apt-get update && \
+            apt-get -y install curl ffmpeg libsm6 libxext6 && \
+            rm -rf /var/lib/apt/lists/*
+      # Install Python dependencies (CPU version of onnxruntime)
+        - kind: RUN
+          value: pip3 install --no-cache-dir numpy pillow opencv-python-headless onnxruntime redis
+      # Create models directory
+        - kind: RUN
+          value: mkdir -p /opt/nuclio/sam3/models
+
+  triggers:
+    myHttpTrigger:
+      maxWorkers: 1
+      kind: 'http'
+      workerAvailabilityTimeoutMilliseconds: 30000
+      attributes:
+        maxRequestBodySize: 67108864  # 64MB
+
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 3
+      mountMode: volume
