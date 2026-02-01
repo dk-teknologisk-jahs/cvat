@@ -6,28 +6,48 @@ metadata:
   name: pth-facebookresearch-sam3-unified
   namespace: cvat
   annotations:
-    name: SAM3 Unified (Interactor + Text)
-    version: 1
+    name: SAM3 Unified (Interactor + Detector + Tracker)
+    version: 2
     type: interactor
     spec:
     min_pos_points: 0
     min_neg_points: 0
     startswith_box_optional: true
-    # Also supports text-to-segment via mode parameter
+    # Supports multiple modes via 'mode' parameter:
+    # - encode (interactor): Point/box prompts → embeddings for browser decoding
+    # - text-to-segment (detector): Text prompts → masks
+    # - track/* (tracker): Video object tracking
     framework: pytorch
     supports_text_prompt: true
     help_message: |
-      Unified SAM3 supporting both point/box prompts (interactor) and text prompts (detector).
-      Uses a single model load to save GPU memory.
+      Unified SAM3 supporting interactor, detector, and tracker modes.
+      Uses a single model load to save GPU memory (~8GB VRAM).
+      
+      Modes:
+      - encode: Point/box prompts for browser-side mask decoding
+      - text-to-segment: Text prompts for automatic detection
+      - track/init, track/frame: Video object tracking
 
 spec:
-  description: Unified SAM3 - Interactor + Text-to-Segment in one function
+  description: Unified SAM3 - Interactor + Detector + Tracker in one function
   runtime: 'python:3.10'
   handler: main:handler
   eventTimeout: 120s
   env:
     - name: PYTHONPATH
       value: /opt/nuclio/sam3:/opt/nuclio
+    # HuggingFace token for accessing gated models (optional)
+    - name: HF_TOKEN
+      value: ""
+    # Redis configuration for video tracking state
+    - name: REDIS_HOST
+      value: "cvat_redis"
+    - name: REDIS_PORT
+      value: "6379"
+    - name: REDIS_PASSWORD
+      value: ""
+    - name: REDIS_TTL
+      value: "3600"  # 1 hour session TTL
 
   build:
     image: cvat.pth.facebookresearch.sam3.unified:latest-gpu
@@ -52,14 +72,22 @@ spec:
           value: pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu121
       # install Python deps
         - kind: RUN
-          value: pip3 install numpy pillow pycocotools
-      # install SAM3 from GitHub
+          value: pip3 install numpy pillow pycocotools redis
+      # install HuggingFace Transformers with SAM3 support
         - kind: RUN
-          value: pip3 install git+https://github.com/facebookresearch/sam3.git
-      # pre-download SAM3 checkpoint (will be cached in image)
+          value: pip3 install transformers>=4.51.0 huggingface_hub accelerate
+      # pre-download SAM3 models (will be cached in image)
         - kind: RUN
           value: |
-            python3 -c "from huggingface_hub import hf_hub_download; hf_hub_download('facebook/sam3', 'sam3.pt')"
+            python3 -c "
+            from huggingface_hub import hf_hub_download
+            # Download the main model files
+            for filename in ['config.json', 'model.safetensors', 'preprocessor_config.json']:
+                try:
+                    hf_hub_download('facebook/sam3-hiera-large', filename)
+                except:
+                    pass
+            "
       # map pip3 and python3 to pip and python
         - kind: RUN
           value: ln -s /usr/bin/pip3 /usr/local/bin/pip && ln -s /usr/bin/python3 /usr/bin/python
