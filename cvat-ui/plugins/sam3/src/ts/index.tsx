@@ -119,6 +119,9 @@ function prepareDecoderInputs(
             boxTopLeft = { x: click.x, y: click.y };
         } else if (click.clickType === 3 && boxTopLeft) {
             // Box bottom-right - complete the box
+            // NOTE: The ONNX decoder includes the prompt encoder which internally
+            // adds +0.5 to shift from pixel corner to pixel center.
+            // We scale raw pixel coordinates - the model handles the shift.
             const x1 = boxTopLeft.x * modelScale.scaleX;
             const y1 = boxTopLeft.y * modelScale.scaleY;
             const x2 = click.x * modelScale.scaleX;
@@ -127,6 +130,9 @@ function prepareDecoderInputs(
             boxTopLeft = null;
         } else if (click.clickType === 0 || click.clickType === 1) {
             // Point: 0=negative, 1=positive
+            // NOTE: The ONNX decoder includes the prompt encoder which internally
+            // adds +0.5 to shift from pixel corner to pixel center.
+            // We scale raw pixel coordinates - the model handles the shift.
             points.push({
                 x: click.x * modelScale.scaleX,
                 y: click.y * modelScale.scaleY,
@@ -212,15 +218,9 @@ const sam3Plugin: SAM3Plugin = {
                                 plugin.data.emb1Cache.has(key) &&
                                 plugin.data.emb2Cache.has(key)
                             );
-                            console.log(`SAM3 enter: key=${key}, hasAllFeatures=${hasAllFeatures}, ` +
-                                `emb0=${plugin.data.emb0Cache.has(key)}, ` +
-                                `emb1=${plugin.data.emb1Cache.has(key)}, ` +
-                                `emb2=${plugin.data.emb2Cache.has(key)}`);
                             if (hasAllFeatures) {
-                                console.log('SAM3 enter: using cached embeddings, skipping server call');
                                 resolve({ preventMethodCall: true });
                             } else {
-                                console.log('SAM3 enter: fetching embeddings from server');
                                 resolve(null);
                             }
                         }
@@ -246,7 +246,6 @@ const sam3Plugin: SAM3Plugin = {
                                         // Check if decoder supports mask input
                                         if (e.data.payload?.supportsMaskInput) {
                                             plugin.data.supportsMaskInput = true;
-                                            console.log('SAM3 decoder supports mask refinement');
                                         }
                                         resolvePromise();
                                     } else {
@@ -304,7 +303,6 @@ const sam3Plugin: SAM3Plugin = {
 
                                 // Process server response if we have new embeddings
                                 if (result) {
-                                    console.log('SAM3 leave: received new embeddings from server');
                                     // Decode base64 embeddings from server
                                     const decodeEmbedding = (base64: string, shape: number[]): Tensor => {
                                         const binaryStr = window.atob(base64);
@@ -329,7 +327,7 @@ const sam3Plugin: SAM3Plugin = {
                                         decodeEmbedding(result.image_embeddings_2, result.image_embeddings_2_shape),
                                     );
                                 } else {
-                                    console.log('SAM3 leave: using cached embeddings (no server result)');
+                                    // Using cached embeddings
                                 }
 
                                 const modelScale = getModelScale(imWidth, imHeight);
@@ -417,12 +415,6 @@ const sam3Plugin: SAM3Plugin = {
                                         return;
                                     }
 
-                                    // Debug: log mask stats
-                                    const maskArray = Array.from(maskData);
-                                    const positivePixels = maskArray.filter((v) => v > 0).length;
-                                    console.log(`SAM3 decode result: maskH=${maskH}, maskW=${maskW}, ` +
-                                        `positivePixels=${positivePixels}/${maskArray.length}`);
-
                                     // Store low-res mask for future refinement (if available)
                                     // Convert raw Float32Array back to Tensor for cache storage
                                     if (lowResMaskData && plugin.data.supportsMaskInput) {
@@ -445,22 +437,12 @@ const sam3Plugin: SAM3Plugin = {
                                         imHeight,
                                     );
 
-                                    // Debug: log final result
-                                    const finalPositive = croppedMask.flat().filter((v) => v > 0).length;
-                                    const croppedH = croppedMask.length;
-                                    const croppedW = croppedMask[0]?.length || 0;
-                                    console.log(`SAM3 final result: image=${imWidth}x${imHeight}, ` +
-                                        `croppedMask=${croppedW}x${croppedH} (${((croppedW * croppedH) / (imWidth * imHeight) * 100).toFixed(1)}% of image), ` +
-                                        `positivePixels=${finalPositive}/${croppedW * croppedH}`);
-
                                     plugin.data.lastClicks = clicks;
 
-                                    const result = {
+                                    resolve({
                                         mask: croppedMask,
                                         bounds: pixelBounds,
-                                    };
-                                    console.log('SAM3 resolving with:', result);
-                                    resolve(result);
+                                    });
                                 };
 
                                 plugin.data.worker.onerror = (error) => {
@@ -629,9 +611,6 @@ function resizeMaskWithBbox(
     const croppedW = dstMaxX - dstMinX + 1;
     const croppedH = dstMaxY - dstMinY + 1;
 
-    console.log(`SAM3 bbox optimization: src bbox [${srcMinX},${srcMinY}]-[${srcMaxX},${srcMaxY}] ` +
-        `→ dst bbox [${dstMinX},${dstMinY}]-[${dstMaxX},${dstMaxY}] (${croppedW}x${croppedH} vs ${dstW}x${dstH})`);
-
     // Step 3: Only interpolate within the cropped region
     const result: number[][] = Array(croppedH).fill(0).map(() => Array(croppedW).fill(0));
 
@@ -652,10 +631,130 @@ function resizeMaskWithBbox(
         }
     }
 
+    // Step 4: Fill small interior holes in the mask (matching official SAM3)
+    fillHoles(result, croppedW, croppedH, 256);
+
     return {
         mask: result,
         bounds: [dstMinX, dstMinY, dstMaxX, dstMaxY],
     };
+}
+
+/**
+ * Fill small interior holes in a binary mask using connected component analysis.
+ *
+ * This matches the official SAM3 implementation from sam3/model/utils/sam1_utils.py:
+ * ```python
+ * labels, areas = connected_components((mask_flat <= self.mask_threshold).to(torch.uint8))
+ * is_hole = (labels > 0) & (areas <= self.max_hole_area)
+ * masks = torch.where(is_hole, self.mask_threshold + 10.0, masks)
+ * ```
+ *
+ * Algorithm:
+ * 1. Find all connected components of background pixels (0)
+ * 2. Mark components that touch the image border as "exterior" (not holes)
+ * 3. For interior components (holes), only fill if area <= maxHoleArea
+ *
+ * @param mask - 2D binary mask array (0 = background, 255 = foreground)
+ * @param width - mask width
+ * @param height - mask height
+ * @param maxHoleArea - maximum hole area to fill (default 256, matching SAM3)
+ */
+function fillHoles(mask: number[][], width: number, height: number, maxHoleArea: number = 256): void {
+    if (width <= 2 || height <= 2) return;  // Too small for holes
+
+    // Connected component labeling using union-find
+    const labels = new Int32Array(width * height);
+    const parent = new Int32Array(width * height);
+    const rank = new Int32Array(width * height);
+
+    // Initialize: each pixel is its own component (or -1 for foreground)
+    for (let i = 0; i < width * height; i++) {
+        parent[i] = i;
+        labels[i] = -1;  // -1 means foreground or unlabeled
+    }
+
+    // Union-Find: find with path compression
+    const find = (x: number): number => {
+        if (parent[x] !== x) {
+            parent[x] = find(parent[x]);
+        }
+        return parent[x];
+    };
+
+    // Union-Find: union by rank
+    const union = (x: number, y: number): void => {
+        const rootX = find(x);
+        const rootY = find(y);
+        if (rootX === rootY) return;
+
+        if (rank[rootX] < rank[rootY]) {
+            parent[rootX] = rootY;
+        } else if (rank[rootX] > rank[rootY]) {
+            parent[rootY] = rootX;
+        } else {
+            parent[rootY] = rootX;
+            rank[rootX]++;
+        }
+    };
+
+    // First pass: label background pixels and union with neighbors
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            if (mask[y][x] !== 0) continue;  // Skip foreground
+
+            const idx = y * width + x;
+            labels[idx] = idx;  // Mark as background (will be resolved to root later)
+
+            // Union with left neighbor
+            if (x > 0 && mask[y][x - 1] === 0) {
+                union(idx, idx - 1);
+            }
+            // Union with top neighbor
+            if (y > 0 && mask[y - 1][x] === 0) {
+                union(idx, idx - width);
+            }
+        }
+    }
+
+    // Second pass: flatten labels to roots and compute component properties
+    const componentArea = new Map<number, number>();
+    const componentTouchesBorder = new Map<number, boolean>();
+
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const idx = y * width + x;
+            if (labels[idx] === -1) continue;  // Skip foreground
+
+            const root = find(idx);
+            labels[idx] = root;
+
+            // Accumulate area
+            componentArea.set(root, (componentArea.get(root) || 0) + 1);
+
+            // Check if this pixel touches the border
+            if (x === 0 || x === width - 1 || y === 0 || y === height - 1) {
+                componentTouchesBorder.set(root, true);
+            }
+        }
+    }
+
+    // Third pass: fill holes (interior components with area <= maxHoleArea)
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const idx = y * width + x;
+            const root = labels[idx];
+            if (root === -1) continue;  // Skip foreground
+
+            const touchesBorder = componentTouchesBorder.get(root) || false;
+            const area = componentArea.get(root) || 0;
+
+            // Fill only interior holes (not touching border) with area <= maxHoleArea
+            if (!touchesBorder && area <= maxHoleArea) {
+                mask[y][x] = 255;
+            }
+        }
+    }
 }
 
 const builder: ComponentBuilder = ({ core }) => {

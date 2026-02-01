@@ -19,7 +19,7 @@ The official SAM3 decoder outputs **3 masks** in multimask mode:
 # For MULTIPLE prompts (non-ambiguous): use mask 0 if stable, else best multi-mask
 
 stability = area(logits > delta) / area(logits > -delta)  # delta=0.05
-if stability >= 0.95:
+if stability >= 0.98:  # Official threshold from model_builder.py
     use_mask_0()
 else:
     use_best_multimask()  # max IoU from masks 1-2
@@ -27,7 +27,43 @@ else:
 
 **Browser implementation** must replicate this logic to avoid holes and disconnected regions.
 
-### 2. Mask Refinement is Critical for Multi-Click
+### 2. Point Coordinate Shift (+0.5 for Pixel Center)
+
+From `sam3/sam/prompt_encoder.py`:
+```python
+def _embed_points(self, points, labels, pad):
+    points = points + 0.5  # Shift to center of pixel
+    ...
+```
+
+**Why**: SAM3 treats pixel coordinates as referring to the **top-left corner** of each pixel. Adding 0.5 shifts them to the **center**, which gives better positional encoding.
+
+**⚠️ NOTE**: The +0.5 shift is done **inside the prompt encoder**, not in the calling code. Since our ONNX decoder (`tracker-prompt-encoder-mask-decoder.onnx`) includes the prompt encoder, the browser code should pass **raw pixel coordinates** (scaled to 1008x1008 space). The model handles the +0.5 shift internally.
+
+### 3. Low-Res Mask Clamping for Refinement
+
+From `sam3/model/sam1_task_predictor.py`:
+```python
+low_res_masks = torch.clamp(low_res_masks, -32.0, 32.0)
+```
+
+The low-resolution mask logits are **clamped to [-32, 32]** before being stored/returned for mask refinement. This prevents extreme values from dominating subsequent predictions.
+
+✅ **FIXED**: Our browser implementation now clamps `lowResMaskData` to [-32, 32] before caching.
+
+### 4. `no_mem_embed` Addition to Features
+
+From `sam3/model/sam1_task_predictor.py`:
+```python
+# Add no_mem_embed, which is added to the lowest rest feat. map during training on videos
+vision_feats[-1] = vision_feats[-1] + self.model.no_mem_embed
+```
+
+The `no_mem_embed` tensor is added to the **lowest-resolution feature map** (72×72 for SAM3). This is a learned embedding that tells the model "there's no memory from previous frames" (image-only mode, not video tracking).
+
+**In ONNX export**: This should be baked into the model or handled as a constant addition.
+
+### 5. Mask Refinement is Critical for Multi-Click
 
 From `sam3/model/sam1_task_predictor.py`:
 - `mask_input`: Previous low-res mask logits `[B, 1, 288, 288]`
@@ -770,7 +806,23 @@ Or use WebGL/WebGPU for accelerated connected component labeling.
 | Feature | Official SAM3 (Python) | usls (Rust) | CVAT SAM3 (Browser) |
 |---------|----------------------|-------------|---------------------|
 | Mask selection | `_dynamic_multimask_via_stability` | Max IoU only | Dynamic stability ✅ |
-| Hole filling | `max_hole_area=256` | None | None (TODO) |
+| Stability threshold | 0.98 | N/A | 0.98 ✅ |
+| Stability delta | 0.05 | N/A | 0.05 ✅ |
+| Point coord +0.5 shift | In prompt encoder | In prompt encoder | In ONNX decoder ✅ |
+| Low-res mask clamping | `clamp(-32, 32)` | None | `clamp(-32, 32)` ✅ |
+| `no_mem_embed` addition | ✅ (to 72×72 feat) | In encoder | In encoder ✅ |
+| Hole filling | `max_hole_area=256` | None | `max_hole_area=256` ✅ |
 | Mask refinement | `mask_input` / `has_mask_input` | None | Partial ✅ |
 | Interpolation | `F.interpolate(align_corners=False)` | `interpolate_1d_u8` | JS bilinear ✅ |
 | Threshold | Logits > 0 | Probs > 0.5 | Logits > 0 ✅ |
+
+---
+
+## TODO: Known Browser Implementation Gaps
+
+1. ~~**Point coordinate +0.5 shift**: Add `+ 0.5` to point coordinates before scaling (matches pixel center)~~ ✅ Handled by ONNX decoder (prompt encoder is included)
+2. ~~**Stability threshold**: Consider changing from 0.95 to 0.98 to match official~~ ✅ Fixed
+3. ~~**Low-res mask clamping**: Clamp to [-32, 32] before caching for refinement~~ ✅ Fixed
+4. ~~**Hole filling**: Implement morphological closing or connected component analysis~~ ✅ Implemented with union-find connected components, matching `max_hole_area=256`
+
+All major implementation gaps have been addressed!

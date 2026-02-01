@@ -120,8 +120,7 @@ if ((self as any).importScripts) {
                 const inputNames = decoder.inputNames;
                 supportsMaskInput = inputNames.includes('mask_input') || inputNames.includes('has_mask_input');
 
-                console.log(`SAM3 decoder loaded. Input names: ${inputNames.join(', ')}`);
-                console.log(`Mask input support: ${supportsMaskInput}`);
+                console.log(`SAM3 decoder loaded (mask refinement: ${supportsMaskInput})`);
 
                 postMessage({
                     action: WorkerAction.INIT,
@@ -143,7 +142,6 @@ if ((self as any).importScripts) {
             const reconstructTensor = (serialized: any, name: string): Tensor => {
                 // If it's already a proper Tensor, return it
                 if (serialized instanceof Tensor) {
-                    console.log(`  ${name}: already Tensor, dims=${serialized.dims}`);
                     return serialized;
                 }
                 // Reconstruct from serialized data
@@ -154,16 +152,12 @@ if ((self as any).importScripts) {
                 // Convert data to proper TypedArray if needed
                 let typedData: Float32Array | BigInt64Array;
                 if (data instanceof Float32Array) {
-                    console.log(`  ${name}: data is Float32Array, length=${data.length}, dims=${dims}`);
                     typedData = data;
                 } else if (data instanceof BigInt64Array) {
-                    console.log(`  ${name}: data is BigInt64Array, length=${data.length}, dims=${dims}`);
                     typedData = data;
                 } else if (typeof data === 'object' && data !== null) {
                     // Convert object-like representation to Float32Array
-                    console.log(`  ${name}: data is object, converting...`);
                     const values = Object.values(data) as number[];
-                    console.log(`  ${name}: converted to array, length=${values.length}`);
                     typedData = new Float32Array(values);
                 } else {
                     throw new Error(`Cannot reconstruct Tensor ${name}: unknown data format (${typeof data})`);
@@ -172,7 +166,7 @@ if ((self as any).importScripts) {
                 return new Tensor(type as 'float32', typedData, dims);
             };
 
-            console.log('SAM3 worker: reconstructing tensors...');
+
 
             // Reconstruct all input tensors
             const inputs = {
@@ -186,7 +180,7 @@ if ((self as any).importScripts) {
                 has_mask_input: rawInputs.has_mask_input,
             };
 
-            console.log('SAM3 worker: tensors reconstructed');
+
 
             // Prepare inputs based on decoder type
             let runInputs: Record<string, Tensor>;
@@ -278,12 +272,7 @@ if ((self as any).importScripts) {
                 };
             }
 
-            console.log('SAM3 worker: running decoder...');
-            console.log('  Input names:', Object.keys(runInputs));
-
             decoder.run(runInputs).then((results) => {
-                console.log('SAM3 worker: decoder returned');
-                console.log('  Output names:', Object.keys(results));
 
                 // Get outputs - handle both naming conventions
                 const iouScores = results.iou_scores || results.iou_predictions;
@@ -295,8 +284,7 @@ if ((self as any).importScripts) {
                     throw new Error(`Missing outputs: iou_scores=${!!iouScores}, pred_masks=${!!predMasks}`);
                 }
 
-                console.log('  iou_scores dims:', iouScores.dims);
-                console.log('  pred_masks dims:', predMasks.dims);
+
 
                 // Parse mask tensor shape
                 // pred_masks shape: [1, 1, 3, H, W] or [1, 3, H, W]
@@ -338,7 +326,7 @@ if ((self as any).importScripts) {
                 //
                 // Stability: stability = area(logits > delta) / area(logits > -delta)
                 const STABILITY_DELTA = 0.05;  // SAM3 default: dynamic_multimask_stability_delta
-                const STABILITY_THRESH = 0.95;  // SAM3 default: dynamic_multimask_stability_thresh
+                const STABILITY_THRESH = 0.98;  // SAM3 default: dynamic_multimask_stability_thresh
 
                 // Compute stability scores for all masks
                 const stabilityScores: number[] = [];
@@ -359,7 +347,7 @@ if ((self as any).importScripts) {
                 let bestIdx: number;
                 let selectionReason: string;
 
-                console.log(`  Prompts: ${totalPrompts} (${numRealPoints} points, ${numBoxes} boxes)`);
+
 
                 if (totalPrompts === 1) {
                     // SINGLE prompt (ambiguous) - select best IoU from multi-mask outputs (masks 1+)
@@ -397,13 +385,7 @@ if ((self as any).importScripts) {
                     }
                 }
 
-                console.log('  Mask selection:');
-                for (let i = 0; i < numMasks; i++) {
-                    const marker = i === bestIdx ? ' ← SELECTED' : '';
-                    console.log(`    Mask ${i}: IoU=${iouData[i]?.toFixed(3) || 'N/A'}, ` +
-                        `stability=${stabilityScores[i].toFixed(3)}${marker}`);
-                }
-                console.log(`  Selection reason: ${selectionReason}`);
+
 
                 // Extract the best mask as LOGITS (not probabilities!)
                 const maskOffset = bestIdx * maskSize;
@@ -412,12 +394,7 @@ if ((self as any).importScripts) {
                     bestMaskLogits[i] = maskData[maskOffset + i];
                 }
 
-                // Log mask logits stats
-                const logitsMin = Math.min(...bestMaskLogits);
-                const logitsMax = Math.max(...bestMaskLogits);
-                const positiveCount = Array.from(bestMaskLogits).filter((v) => v > 0).length;
-                console.log(`  Mask logits: min=${logitsMin.toFixed(3)}, max=${logitsMax.toFixed(3)}, ` +
-                    `positive=${positiveCount}/${maskSize} (${(100*positiveCount/maskSize).toFixed(1)}%)`);
+
 
                 // Following official SAM3 and usls implementations:
                 // Return the FULL mask (no bounding box cropping)
@@ -432,6 +409,7 @@ if ((self as any).importScripts) {
                 // Note: Low-res mask extraction moved to the postMessage block below
 
                 // Extract low-res mask data for mask refinement (if available)
+                // Official SAM3 clamps to [-32, 32] before storing (sam1_task_predictor.py:430)
                 let lowResMaskData: Float32Array | undefined;
                 if (lowResMasks && supportsMaskInput) {
                     // low_res_masks shape: [1, 3, 288, 288] or [1, 1, 3, 288, 288]
@@ -442,7 +420,8 @@ if ((self as any).importScripts) {
                     lowResMaskData = new Float32Array(lowResMaskSize);
                     const lowResOffset = bestIdx * lowResMaskSize;
                     for (let i = 0; i < lowResMaskSize; i++) {
-                        lowResMaskData[i] = lowResFullData[lowResOffset + i];
+                        // Clamp to [-32, 32] as per official SAM3 implementation
+                        lowResMaskData[i] = Math.max(-32, Math.min(32, lowResFullData[lowResOffset + i]));
                     }
                 }
 
