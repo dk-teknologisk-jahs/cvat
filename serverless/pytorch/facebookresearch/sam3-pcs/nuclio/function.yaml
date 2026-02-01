@@ -1,0 +1,71 @@
+# Copyright (C) 2024 CVAT.ai Corporation
+#
+# SPDX-License-Identifier: MIT
+
+metadata:
+  name: pth-facebookresearch-sam3-pcs
+  namespace: cvat
+  annotations:
+    name: SAM3 Text-to-Segment
+    version: 1
+    type: detector
+    spec:
+    framework: pytorch
+    supports_text_prompt: true
+    help_message: SAM3 text-to-segment allows finding and segmenting objects using text descriptions. Supports 270K+ concepts.
+
+spec:
+  description: Text-to-segment with Segment Anything 3 (SAM3 PCS mode)
+  runtime: 'python:3.10'
+  handler: main_pcs:handler
+  eventTimeout: 180s  # Longer timeout for CPU inference
+  env:
+    - name: PYTHONPATH
+      value: /opt/nuclio/sam3:/opt/nuclio
+
+  build:
+    image: cvat.pth.facebookresearch.sam3.pcs
+    baseImage: ubuntu:22.04
+
+    directives:
+      preCopy:
+      # disable interactive frontend
+        - kind: ENV
+          value: DEBIAN_FRONTEND=noninteractive
+      # set workdir
+        - kind: WORKDIR
+          value: /opt/nuclio/sam3
+      # install basic deps
+        - kind: RUN
+          value: apt-get update && apt-get -y install curl git python3 python3-pip ffmpeg libsm6 libxext6
+      # install PyTorch CPU-only
+        - kind: RUN
+          value: pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+      # install Python deps
+        - kind: RUN
+          value: pip3 install numpy pillow pycocotools
+      # install SAM3 from GitHub
+        - kind: RUN
+          value: pip3 install git+https://github.com/facebookresearch/sam3.git
+      # pre-download SAM3 checkpoint (will be cached in image)
+        - kind: RUN
+          value: |
+            python3 -c "from huggingface_hub import hf_hub_download; hf_hub_download('facebook/sam3', 'sam3.pt')"
+      # map pip3 and python3 to pip and python
+        - kind: RUN
+          value: ln -s /usr/bin/pip3 /usr/local/bin/pip && ln -s /usr/bin/python3 /usr/bin/python
+
+  triggers:
+    myHttpTrigger:
+      maxWorkers: 1  # CPU-heavy, limit concurrent workers
+      kind: 'http'
+      workerAvailabilityTimeoutMilliseconds: 60000
+      attributes:
+        maxRequestBodySize: 67108864
+
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 3
+      mountMode: volume
