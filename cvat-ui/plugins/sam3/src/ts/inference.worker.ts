@@ -8,29 +8,40 @@
  * Runs the prompt encoder + mask decoder ONNX model in the browser.
  * Receives embeddings from server, decodes masks locally for fast interaction.
  *
- * ONNX Model: tracker-prompt-encoder-mask-decoder-with-mask-input.onnx (17 MB)
+ * ONNX Model: tracker-decoder.onnx (21.4 MB)
+ *
+ * ============================================================================
+ * NEW UNIFIED ARCHITECTURE (HuggingFace export via export_hf_onnx.py)
+ * ============================================================================
+ *
+ * Vision encoder outputs 256 channels at ALL FPN levels (no projections baked in).
+ * Tracker decoder includes conv_s0/conv_s1 projections internally.
+ *
+ * Inputs (HuggingFace unified decoder):
+ *   - fpn_feat_0: [batch, 256, 288, 288] FLOAT32 (from vision encoder)
+ *   - fpn_feat_1: [batch, 256, 144, 144] FLOAT32 (from vision encoder)
+ *   - fpn_feat_2: [batch, 256, 72, 72] FLOAT32 (from vision encoder)
+ *   - point_coords: [batch, num_objects, num_points, 2] FLOAT32 (4D for HF!)
+ *   - point_labels: [batch, num_objects, num_points] FLOAT32 (3D for HF!)
+ *   - mask_input: [batch, 1, 288, 288] FLOAT32 (previous low-res mask logits)
+ *   - has_mask_input: [batch] FLOAT32 (1.0 if mask_input is valid)
+ *
+ * ============================================================================
+ * LEGACY: Standard decoder (usls export) - still supported for backward compat
+ * ============================================================================
  *
  * Inputs (standard decoder - usls export, no mask input support):
  *   - input_points: [batch, 1, num_points, 2] FLOAT32
  *   - input_labels: [batch, 1, num_points] INT64 (1=pos, 0=neg)
  *   - input_boxes: [batch, num_boxes, 4] FLOAT32 (xyxy scaled to 1008)
- *   - image_embeddings.0: [batch, 32, 288, 288] FLOAT32
- *   - image_embeddings.1: [batch, 64, 144, 144] FLOAT32
- *   - image_embeddings.2: [batch, 256, 72, 72] FLOAT32
+ *   - image_embeddings.0: [batch, 32, 288, 288] FLOAT32 (32ch)
+ *   - image_embeddings.1: [batch, 64, 144, 144] FLOAT32 (64ch)
+ *   - image_embeddings.2: [batch, 256, 72, 72] FLOAT32 (256ch)
  *
- * Inputs (custom decoder with mask input support):
- *   - image_embed: [batch, 256, 72, 72] FLOAT32
- *   - high_res_feats_0: [batch, 32, 288, 288] FLOAT32
- *   - high_res_feats_1: [batch, 64, 144, 144] FLOAT32
- *   - point_coords: [batch, num_points, 2] FLOAT32 (includes box corners as points)
- *   - point_labels: [batch, num_points] FLOAT32 (0=neg, 1=pos, -1=pad, 2=box TL, 3=box BR)
- *   - mask_input: [batch, 1, 288, 288] FLOAT32 (previous low-res mask logits)
- *   - has_mask_input: [batch] FLOAT32 (1.0 if mask_input is valid)
- *
- * Outputs:
- *   - iou_scores/iou_predictions: [batch, 2] or [batch, 3] FLOAT32
- *   - pred_masks/masks: [batch, 2, H, W] or [batch, 3, H, W] FLOAT32
- *   - low_res_masks: [batch, 2, 288, 288] or [batch, 3, 288, 288] FLOAT32
+ * Outputs (both decoder types):
+ *   - iou_scores/iou_predictions: [batch, 3] FLOAT32
+ *   - pred_masks/masks: [batch, 3, H, W] FLOAT32
+ *   - low_res_masks: [batch, 3, 288, 288] FLOAT32
  *   - object_score_logits: [batch, 1] FLOAT32
  */
 
@@ -38,6 +49,7 @@ import { InferenceSession, env, Tensor } from 'onnxruntime-web';
 
 let decoder: InferenceSession | null = null;
 let supportsMaskInput = false; // Detected at init time based on model inputs
+let isUnifiedDecoder = false;  // True for HuggingFace unified decoder (256ch inputs)
 
 env.wasm.wasmPaths = '/assets/';
 
@@ -58,6 +70,10 @@ export interface DecodeBody {
     'image_embeddings.0': Tensor;
     'image_embeddings.1': Tensor;
     'image_embeddings.2': Tensor;
+    // New unified decoder inputs (256ch from HuggingFace export)
+    fpn_feat_0?: Tensor;  // [1, 256, 288, 288]
+    fpn_feat_1?: Tensor;  // [1, 256, 144, 144]
+    fpn_feat_2?: Tensor;  // [1, 256, 72, 72]
     // Mask refinement inputs (optional, for custom decoder with mask support)
     mask_input?: Tensor;        // [1, 1, 288, 288] previous low-res mask logits
     has_mask_input?: boolean;   // Whether mask_input is valid
@@ -116,15 +132,22 @@ if ((self as any).importScripts) {
             InferenceSession.create(body.decoderURL).then((decoderSession) => {
                 decoder = decoderSession;
 
-                // Detect if the model supports mask input
+                // Detect decoder type based on input names
                 const inputNames = decoder.inputNames;
+
+                // Detect if this is the new unified decoder (256ch inputs)
+                // Unified decoder uses fpn_feat_* naming instead of image_embeddings.*
+                isUnifiedDecoder = inputNames.includes('fpn_feat_0') || inputNames.includes('fpn_feat_1');
+
+                // Detect if the model supports mask input
                 supportsMaskInput = inputNames.includes('mask_input') || inputNames.includes('has_mask_input');
 
-                console.log(`SAM3 decoder loaded (mask refinement: ${supportsMaskInput})`);
+                console.log(`SAM3 decoder loaded (unified: ${isUnifiedDecoder}, mask refinement: ${supportsMaskInput})`);
+                console.log(`  Input names: ${inputNames.join(', ')}`);
 
                 postMessage({
                     action: WorkerAction.INIT,
-                    payload: { supportsMaskInput },
+                    payload: { supportsMaskInput, isUnifiedDecoder },
                 });
             }).catch((error: unknown) => {
                 postMessage({ action: WorkerAction.INIT, error: errorToMessage(error) });
@@ -166,28 +189,111 @@ if ((self as any).importScripts) {
                 return new Tensor(type as 'float32', typedData, dims);
             };
 
-
-
-            // Reconstruct all input tensors
-            const inputs = {
+            // Reconstruct all input tensors (handle both legacy and unified formats)
+            const inputs: Record<string, any> = {
                 input_points: reconstructTensor(rawInputs.input_points, 'input_points'),
                 input_labels: reconstructTensor(rawInputs.input_labels, 'input_labels'),
                 input_boxes: reconstructTensor(rawInputs.input_boxes, 'input_boxes'),
-                'image_embeddings.0': reconstructTensor(rawInputs['image_embeddings.0'], 'image_embeddings.0'),
-                'image_embeddings.1': reconstructTensor(rawInputs['image_embeddings.1'], 'image_embeddings.1'),
-                'image_embeddings.2': reconstructTensor(rawInputs['image_embeddings.2'], 'image_embeddings.2'),
                 mask_input: rawInputs.mask_input ? reconstructTensor(rawInputs.mask_input, 'mask_input') : undefined,
                 has_mask_input: rawInputs.has_mask_input,
             };
 
-
+            // Reconstruct embeddings - check for unified (256ch) or legacy (32/64/256ch) format
+            if (rawInputs.fpn_feat_0) {
+                // New unified format (256ch at all levels)
+                inputs.fpn_feat_0 = reconstructTensor(rawInputs.fpn_feat_0, 'fpn_feat_0');
+                inputs.fpn_feat_1 = reconstructTensor(rawInputs.fpn_feat_1!, 'fpn_feat_1');
+                inputs.fpn_feat_2 = reconstructTensor(rawInputs.fpn_feat_2!, 'fpn_feat_2');
+            } else {
+                // Legacy format (32/64/256ch)
+                inputs['image_embeddings.0'] = reconstructTensor(rawInputs['image_embeddings.0'], 'image_embeddings.0');
+                inputs['image_embeddings.1'] = reconstructTensor(rawInputs['image_embeddings.1'], 'image_embeddings.1');
+                inputs['image_embeddings.2'] = reconstructTensor(rawInputs['image_embeddings.2'], 'image_embeddings.2');
+            }
 
             // Prepare inputs based on decoder type
             let runInputs: Record<string, Tensor>;
 
-            if (supportsMaskInput) {
-                // Custom decoder with mask input support
-                // Remap input names from standard format to custom format
+            if (isUnifiedDecoder) {
+                // ===================================================================
+                // NEW UNIFIED DECODER (HuggingFace export via export_hf_onnx.py)
+                // ===================================================================
+                // Accepts 256ch at all FPN levels, includes conv_s0/conv_s1 internally
+                // Point coords are 4D [B, num_objects, num_points, 2]
+                // Point labels are 3D [B, num_objects, num_points]
+
+                const emb0 = inputs.fpn_feat_0 || inputs['image_embeddings.0'];
+                const emb1 = inputs.fpn_feat_1 || inputs['image_embeddings.1'];
+                const emb2 = inputs.fpn_feat_2 || inputs['image_embeddings.2'];
+
+                // Create mask input tensors
+                const maskInputData = hasMaskFromCaller
+                    ? inputs.mask_input!
+                    : new Tensor('float32', new Float32Array(1 * 1 * 288 * 288).fill(0), [1, 1, 288, 288]);
+                const hasMaskInputData = new Tensor(
+                    'float32',
+                    new Float32Array([hasMaskFromCaller ? 1.0 : 0.0]),
+                    [1],
+                );
+
+                // Get existing points from input_points [1, 1, N, 2] and input_labels [1, 1, N]
+                const existingPointsData = inputs.input_points.data as Float32Array;
+                const existingLabelsData = inputs.input_labels.data as Float32Array;
+                const numExistingPoints = inputs.input_points.dims[2] as number;
+
+                // Get boxes from input_boxes [1, num_boxes, 4]
+                // Convert boxes to point pairs with labels 2 (top-left) and 3 (bottom-right)
+                const boxesData = inputs.input_boxes?.data as Float32Array | undefined;
+                const numBoxes = (inputs.input_boxes?.dims?.[1] as number) || 0;
+
+                // Total points = existing points + 2 points per box (top-left, bottom-right)
+                const totalPoints = numExistingPoints + numBoxes * 2;
+
+                // Create combined arrays
+                const allPointCoords = new Float32Array(totalPoints * 2);
+                const allPointLabels = new Float32Array(totalPoints);
+
+                // Copy existing points
+                for (let i = 0; i < numExistingPoints; i++) {
+                    allPointCoords[i * 2] = existingPointsData[i * 2];
+                    allPointCoords[i * 2 + 1] = existingPointsData[i * 2 + 1];
+                    allPointLabels[i] = existingLabelsData[i];
+                }
+
+                // Add box corners as points
+                if (boxesData && numBoxes > 0) {
+                    for (let i = 0; i < numBoxes; i++) {
+                        const boxOffset = i * 4;
+                        const pointOffset = numExistingPoints + i * 2;
+
+                        // Top-left corner (label 2)
+                        allPointCoords[pointOffset * 2] = boxesData[boxOffset];  // x1
+                        allPointCoords[pointOffset * 2 + 1] = boxesData[boxOffset + 1];  // y1
+                        allPointLabels[pointOffset] = 2;
+
+                        // Bottom-right corner (label 3)
+                        allPointCoords[(pointOffset + 1) * 2] = boxesData[boxOffset + 2];  // x2
+                        allPointCoords[(pointOffset + 1) * 2 + 1] = boxesData[boxOffset + 3];  // y2
+                        allPointLabels[pointOffset + 1] = 3;
+                    }
+                }
+
+                // HuggingFace decoder expects:
+                // - point_coords: [B, num_objects, num_points, 2] - 4D tensor
+                // - point_labels: [B, num_objects, num_points] - 3D tensor
+                runInputs = {
+                    fpn_feat_0: emb0,  // [1, 256, 288, 288]
+                    fpn_feat_1: emb1,  // [1, 256, 144, 144]
+                    fpn_feat_2: emb2,  // [1, 256, 72, 72]
+                    point_coords: new Tensor('float32', allPointCoords, [1, 1, totalPoints, 2]),  // 4D!
+                    point_labels: new Tensor('float32', allPointLabels, [1, 1, totalPoints]),     // 3D!
+                    mask_input: maskInputData,
+                    has_mask_input: hasMaskInputData,
+                };
+            } else if (supportsMaskInput) {
+                // ===================================================================
+                // LEGACY: Custom decoder with mask input support (32/64/256ch)
+                // ===================================================================
                 const emb0 = inputs['image_embeddings.0'];
                 const emb1 = inputs['image_embeddings.1'];
                 const emb2 = inputs['image_embeddings.2'];
@@ -254,7 +360,9 @@ if ((self as any).importScripts) {
                     has_mask_input: hasMaskInputData,
                 };
             } else {
-                // Standard decoder (usls export) - no mask input
+                // ===================================================================
+                // LEGACY: Standard decoder (usls export) - no mask input
+                // ===================================================================
                 // The usls decoder expects input_labels as INT64, so convert from float32
                 const labelsFloat = inputs.input_labels.data as Float32Array;
                 const labelsInt64 = new BigInt64Array(labelsFloat.length);

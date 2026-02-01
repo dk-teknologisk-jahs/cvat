@@ -2,7 +2,7 @@
 
 This document describes SAM3 architecture, ONNX export strategies, and how SAM3 covers **all three CVAT AI tool categories**: Interactor, Detector, and Tracker.
 
-> **Last Updated**: 1 February 2026
+> **Last Updated**: 1 February 2026 (All ONNX exports complete)
 
 ---
 
@@ -39,41 +39,56 @@ This means:
 |-----------|--------|-------|
 | **Vision Encoder** | ✅ Exported & Verified | 1789 MB, outputs 256ch at all FPN levels |
 | **Tracker Decoder** | ✅ Exported & Verified | 21.4 MB, includes conv_s0/conv_s1 projections |
-| **Text Encoder** | ✅ Exported & Verified | 1.3 GB, CLIP + projection to 256ch |
-| **PCS Decoder** | ✅ Exported | 123 MB, DETR encoder/decoder + heads |
-| **Export Script** | ✅ Fixed | `serverless/pytorch/facebookresearch/sam3/nuclio/export_hf_onnx.py` |
+| **Text Encoder** | ✅ Exported & Verified | 1.3 GB, CLIP + projection to 256ch (uses Sam3Model) |
+| **PCS Decoder** | ✅ Exported & Verified | 123 MB, DETR encoder/decoder + heads (uses Sam3Model) |
+| **Export Script** | ✅ Fixed | Now uses Sam3TrackerModel for PVS, Sam3Model for PCS |
 | **Verification Tests** | ✅ Passed | **>99% IoU** across all test shapes |
 | **Unified ONNX Function** | ✅ Implemented | `serverless/onnx/facebookresearch/sam3-unified/nuclio/` |
 | **Redis State Management** | ✅ Implemented | Video tracking session state in Redis |
 | **Comprehensive Test Suite** | ✅ Created | 4 test files in unified function directory |
+| **Browser Integration** | ✅ Implemented | `inference.worker.ts` supports unified decoder (256ch, 4D points) |
 
-#### 🔄 Remaining Tasks
+#### 🔄 Next Steps (Priority Order)
 
-| Task | Status | Notes |
-|------|--------|-------|
-| ONNX model hosting | 🔄 Pending | Host exported models for Docker build |
-| Browser integration | 🔄 Pending | Update `model_handler.py` input shapes to 4D |
-| Update test files | 🔄 Pending | Match Sam3TrackerProcessor preprocessing |
-| Export text_encoder/pcs_decoder | 🔄 Pending | Need to use Sam3TrackerModel weights |
+| # | Task | Notes |
+|---|------|-------|
+| 1 | **Host ONNX models** | Upload 4 models (~3.3 GB) to HuggingFace Hub or cloud storage for Docker build |
+| 2 | **Create Dockerfile** | Add ONNX model download to `function-gpu.yaml` or create custom Dockerfile |
+| 3 | **End-to-end testing** | Test interactor (clicks→mask), detector (text→masks), tracker (propagate) |
+| 4 | **Update test preprocessing** | Match Sam3TrackerProcessor for consistent image preprocessing |
+
+#### Exported ONNX Models (Ready for Hosting)
+
+| Model | Size | Export Command |
+|-------|------|----------------|
+| `vision-encoder.onnx` | 1.79 GB | `python export_hf_onnx.py --vision-encoder` |
+| `tracker-decoder.onnx` | 21.4 MB | `python export_hf_onnx.py --tracker-decoder` |
+| `text-encoder.onnx` | 1.35 GB | `python export_hf_onnx.py --text-encoder` |
+| `pcs-decoder.onnx` | 123 MB | `python export_hf_onnx.py --pcs-decoder` |
+| **Total** | **~3.3 GB** | `python export_hf_onnx.py --all` |
+
+**Export location**: `/tmp/sam3-onnx-pcs/` (or specify with `--output-dir`)
+
+**Environment**: Use `conda run -n grimme-tf2.18` for export (requires PyTorch 2.6+, transformers with SAM3 support)
 
 #### ⚠️ CRITICAL FINDING: Sam3Model vs Sam3TrackerModel
 
 **Root Cause of Previous Issues**: The export script was using `Sam3Model` instead of `Sam3TrackerModel`. These are **DIFFERENT models with DIFFERENT weights**:
 
-| Model | HuggingFace Class | Parameters Loaded | Purpose |
-|-------|-------------------|-------------------|---------|
-| `Sam3Model` | `from transformers import Sam3Model` | 1468 params | Full SAM3 with video memory |
-| `Sam3TrackerModel` | `from transformers import Sam3TrackerModel` | 685 params | Tracker subset only |
+| Model | HuggingFace Class | Parameters | Purpose | Components |
+|-------|-------------------|------------|---------|------------|
+| `Sam3Model` | `from transformers import Sam3Model` | 1468 params | Full SAM3 for PCS (text prompts) | text_encoder, geometry_encoder, detr_encoder/decoder |
+| `Sam3TrackerModel` | `from transformers import Sam3TrackerModel` | 685 params | Tracker for PVS (point/box prompts) | vision_encoder, prompt_encoder, mask_decoder |
 
-**The fix**: Changed export script to import `Sam3TrackerModel` instead of `Sam3Model`:
+**Export Strategy** (CORRECTED):
 ```python
-# WRONG - loads different weights!
-from transformers import Sam3Model
-hf_model = Sam3Model.from_pretrained("facebook/sam3")
-
-# CORRECT - matches Sam3TrackerProcessor
+# For vision encoder + tracker decoder (PVS/Interactor mode):
 from transformers import Sam3TrackerModel
-hf_model = Sam3TrackerModel.from_pretrained("facebook/sam3")
+tracker_model = Sam3TrackerModel.from_pretrained("facebook/sam3")
+
+# For text encoder + PCS decoder (PCS/Detector mode):
+from transformers import Sam3Model
+pcs_model = Sam3Model.from_pretrained("facebook/sam3")
 ```
 
 **Weight Comparison Evidence**:
@@ -201,9 +216,12 @@ Create a **single nuclio function** that handles all three CVAT AI tool types, s
    - ✅ Implemented CVAT tracker interface (`shapes` + `states` format)
    - ✅ Added `track/init`, `track/frame`, `track/clear` modes in `main.py`
 
-2. 🔄 **Browser Integration** for interactor mode
-   - Update `inference.worker.ts` to accept 256ch vision encoder outputs
-   - Deploy tracker decoder ONNX to plugin assets
+2. ✅ **Browser Integration** for interactor mode
+   - ✅ Updated `inference.worker.ts` to detect unified decoder (256ch inputs)
+   - ✅ Added support for `fpn_feat_*` tensor names (new unified format)
+   - ✅ Added 4D point_coords `[B, num_objects, num_points, 2]` for HuggingFace decoder
+   - ✅ Added 3D point_labels `[B, num_objects, num_points]` for HuggingFace decoder
+   - ✅ Backward compatible with legacy 32/64/256ch decoders
 
 3. 🔄 **End-to-End Testing**
    - Test interactor mode (clicks → mask)

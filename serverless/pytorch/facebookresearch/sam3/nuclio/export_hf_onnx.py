@@ -922,38 +922,61 @@ def main():
     device = args.device if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    # Load HuggingFace Sam3TrackerModel (NOT Sam3Model - they have different weights!)
-    # Sam3TrackerModel has 685 params, Sam3Model has 1468 params (includes video memory)
-    print(f"\nLoading HuggingFace Sam3TrackerModel from {args.model_path}...")
-    from transformers import Sam3TrackerModel
-    hf_model = Sam3TrackerModel.from_pretrained(args.model_path).to(device).eval()
+    # =========================================================================
+    # Model Loading Strategy:
+    # - Sam3TrackerModel: For vision encoder and tracker decoder (PVS mode)
+    # - Sam3Model: For text encoder and PCS decoder (PCS mode)
+    #
+    # These are DIFFERENT models with DIFFERENT weights!
+    # Sam3TrackerModel has 685 params, Sam3Model has 1468 params
+    # =========================================================================
 
-    # For tracker decoder, we use the HuggingFace model directly now
     tracker_model = None
-    if args.all or args.tracker_decoder or args.verify:
-        # Sam3TrackerModel has the tracker components we need
-        tracker_model = hf_model
+    pcs_model = None
+
+    # Load Sam3TrackerModel for vision encoder and tracker decoder
+    if args.all or args.vision_encoder or args.tracker_decoder or args.verify:
+        print(f"\nLoading HuggingFace Sam3TrackerModel from {args.model_path}...")
+        from transformers import Sam3TrackerModel
+        tracker_model = Sam3TrackerModel.from_pretrained(args.model_path).to(device).eval()
+        print(f"  Sam3TrackerModel loaded: {sum(p.numel() for p in tracker_model.parameters())} parameters")
+
+    # Load Sam3Model for text encoder and PCS decoder
+    if args.all or args.text_encoder or args.pcs_decoder:
+        print(f"\nLoading HuggingFace Sam3Model from {args.model_path}...")
+        from transformers import Sam3Model
+        pcs_model = Sam3Model.from_pretrained(args.model_path).to(device).eval()
+        print(f"  Sam3Model loaded: {sum(p.numel() for p in pcs_model.parameters())} parameters")
 
     # Export components
     if args.all or args.vision_encoder:
-        export_vision_encoder(hf_model, output_dir, device)
+        if tracker_model is None:
+            print("ERROR: Sam3TrackerModel not loaded for vision encoder export")
+        else:
+            export_vision_encoder(tracker_model, output_dir, device)
 
     if args.all or args.tracker_decoder:
         if tracker_model is None:
-            print("ERROR: Tracker model not loaded")
+            print("ERROR: Sam3TrackerModel not loaded for tracker decoder export")
         else:
             export_tracker_decoder(tracker_model, output_dir, device)
 
     if args.all or args.text_encoder:
-        export_text_encoder(hf_model, output_dir, device)
+        if pcs_model is None:
+            print("ERROR: Sam3Model not loaded for text encoder export")
+        else:
+            export_text_encoder(pcs_model, output_dir, device)
 
     if args.all or args.pcs_decoder:
-        export_pcs_decoder(hf_model, output_dir, device)
+        if pcs_model is None:
+            print("ERROR: Sam3Model not loaded for PCS decoder export")
+        else:
+            export_pcs_decoder(pcs_model, output_dir, device)
 
     # Verify
     if args.verify:
-        if (output_dir / "vision-encoder.onnx").exists():
-            verify_vision_encoder(output_dir / "vision-encoder.onnx", hf_model, device)
+        if (output_dir / "vision-encoder.onnx").exists() and tracker_model:
+            verify_vision_encoder(output_dir / "vision-encoder.onnx", tracker_model, device)
 
         if (output_dir / "tracker-decoder.onnx").exists() and tracker_model:
             verify_tracker_decoder(output_dir / "tracker-decoder.onnx", tracker_model, device)
