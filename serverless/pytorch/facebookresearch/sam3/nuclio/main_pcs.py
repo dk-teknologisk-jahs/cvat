@@ -246,13 +246,18 @@ def test_handler():
     print(f"\nResponse status: {response.status_code}")
     result = json.loads(response.body)
 
-    if 'detections' in result:
-        print(f"Found {len(result['detections'])} detections in {elapsed:.2f}s")
-        for d in result['detections'][:5]:
-            print(f"  - {d['label']}: score={d['score']:.3f}, box={[round(x) for x in d['box']]}")
-            print(f"    mask size: {d['mask']['size']}")
-    else:
+    if isinstance(result, list):
+        # New CVAT detector format (flat array)
+        print(f"Found {len(result)} detections in {elapsed:.2f}s")
+        for d in result[:5]:
+            mask_data = d['mask']
+            rle_counts = mask_data[:-4]
+            bbox = mask_data[-4:]  # [xtl, ytl, xbr, ybr]
+            print(f"  - {d['label']}: box={bbox}, rle_count_length={len(rle_counts)}")
+    elif 'error' in result:
         print(f"Error: {result.get('error')}")
+    else:
+        print(f"Unexpected response format: {result}")
 
     print("\nTest complete!")
 
