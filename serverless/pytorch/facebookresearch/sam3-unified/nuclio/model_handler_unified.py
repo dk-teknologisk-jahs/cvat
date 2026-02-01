@@ -65,7 +65,7 @@ class RedisCache:
         self.ttl = ttl
         self.client = None
         self._memory_cache = {}
-        
+
         try:
             import redis
             self.client = redis.Redis(host=host, port=port, decode_responses=False)
@@ -149,7 +149,7 @@ class UnifiedModelHandler:
         """
         self.device = device if torch.cuda.is_available() else "cpu"
         self.confidence_threshold = confidence_threshold
-        
+
         # Model ID for HuggingFace
         self._model_id = "facebook/sam3"
 
@@ -322,7 +322,7 @@ class UnifiedModelHandler:
         """
         # Ensure tracker model is loaded
         self._init_sam3_tracker_model()
-        
+
         if self._sam3_tracker_model is None or self._sam3_tracker_processor is None:
             raise RuntimeError("Sam3TrackerModel not available")
 
@@ -344,12 +344,12 @@ class UnifiedModelHandler:
             vision_outputs = self._sam3_tracker_model.vision_encoder(
                 inputs["pixel_values"]
             )
-            
+
             # Extract features at different levels
             # The tracker model provides high_res_feats and image_embed
             high_res_feats = vision_outputs.get("high_res_feats", [])
             image_embed = vision_outputs.get("image_embed")
-            
+
             if len(high_res_feats) >= 2 and image_embed is not None:
                 high_res_0 = high_res_feats[0]  # [1, 32, 288, 288]
                 high_res_1 = high_res_feats[1]  # [1, 64, 144, 144]
@@ -404,7 +404,7 @@ class UnifiedModelHandler:
         """
         # Ensure PCS model is loaded
         self._init_sam3_model()
-        
+
         if self._sam3_model is None or self._sam3_processor is None:
             logger.error("Sam3Model not available")
             return []
@@ -540,7 +540,7 @@ class UnifiedModelHandler:
 
             # Process first frame
             frame_array = np.array(image)
-            
+
             # Initialize video session
             inference_session = self._sam3_video_processor.init_video_session(
                 video=[frame_array],
@@ -552,7 +552,7 @@ class UnifiedModelHandler:
 
             # Add box prompt for the object
             input_box = torch.tensor([[box]], device=self.device)
-            
+
             inference_session = self._sam3_video_processor.add_new_points_or_box(
                 inference_session=inference_session,
                 frame_idx=0,
@@ -574,7 +574,7 @@ class UnifiedModelHandler:
             mask = None
             polygon = []
             score = 0.0
-            
+
             if processed.get("masks") is not None and len(processed["masks"]) > 0:
                 mask_tensor = processed["masks"][0]
                 mask = (
@@ -584,7 +584,7 @@ class UnifiedModelHandler:
                 )
                 if len(mask.shape) > 2:
                     mask = mask.squeeze()
-                
+
                 polygon = self._extract_mask_polygon(mask)
                 score = float(processed["scores"][0]) if "scores" in processed else 0.9
 
@@ -651,7 +651,7 @@ class UnifiedModelHandler:
 
             # Add new frame to session
             frame_array = np.array(image)
-            
+
             # Process the frame
             inputs = self._sam3_video_processor(
                 images=image,

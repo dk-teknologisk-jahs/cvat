@@ -200,11 +200,11 @@ class VisionEncoderWrapper(nn.Module):
 
 class TrackerDecoderWrapper(nn.Module):
     """
-    SAM3 Tracker Decoder with conv_s0/conv_s1 projections included.
+    SAM3 Tracker Decoder wrapper for HuggingFace Sam3TrackerModel.
 
     This decoder:
     1. Projects high-res features: 256ch → 32ch (conv_s0) and 256ch → 64ch (conv_s1)
-    2. Adds no_mem_embed to the main embedding
+    2. Adds no_memory_embedding to the main embedding
     3. Encodes point/box prompts
     4. Runs the SAM mask decoder
     5. Returns multiple mask candidates with IoU scores
@@ -231,33 +231,35 @@ class TrackerDecoderWrapper(nn.Module):
 
     def __init__(
         self,
-        sam_prompt_encoder: nn.Module,
-        sam_mask_decoder: nn.Module,
-        no_mem_embed: nn.Parameter,
+        sam3_tracker_model,
         multimask_output: bool = True,
     ):
         super().__init__()
-        self.sam_prompt_encoder = sam_prompt_encoder
-        self.sam_mask_decoder = sam_mask_decoder
+        self.prompt_encoder = sam3_tracker_model.prompt_encoder
+        self.mask_decoder = sam3_tracker_model.mask_decoder
         self.multimask_output = multimask_output
 
-        # Register no_mem_embed as buffer - reshape to spatial format [1, C, 1, 1] for broadcasting
+        # Register no_memory_embedding as buffer - reshape for broadcasting [1, 256, 1, 1]
         # Original shape is [1, 1, 256], we need [1, 256, 1, 1] for [B, C, H, W] addition
-        no_mem_embed_spatial = no_mem_embed.data.clone().view(1, -1, 1, 1)
-        self.register_buffer("no_mem_embed", no_mem_embed_spatial)
+        no_mem_data = sam3_tracker_model.no_memory_embedding.data.clone().view(1, -1, 1, 1)
+        self.register_buffer("no_mem_embed", no_mem_data)
+
+        # Get image-wide positional embeddings (stored for ONNX export)
+        image_pe = sam3_tracker_model.get_image_wide_positional_embeddings()  # [1, 256, 72, 72]
+        self.register_buffer("image_pe", image_pe)
 
         # Get conv_s0 and conv_s1 from mask decoder
         # These project 256ch → 32ch and 256ch → 64ch
-        self.conv_s0 = sam_mask_decoder.conv_s0
-        self.conv_s1 = sam_mask_decoder.conv_s1
+        self.conv_s0 = self.mask_decoder.conv_s0
+        self.conv_s1 = self.mask_decoder.conv_s1
 
     def forward(
         self,
         fpn_feat_0: torch.Tensor,      # [B, 256, 288, 288]
         fpn_feat_1: torch.Tensor,      # [B, 256, 144, 144]
         fpn_feat_2: torch.Tensor,      # [B, 256, 72, 72]
-        point_coords: torch.Tensor,    # [B, N, 2]
-        point_labels: torch.Tensor,    # [B, N]
+        point_coords: torch.Tensor,    # [B, num_objects, num_points, 2]
+        point_labels: torch.Tensor,    # [B, num_objects, num_points]
         mask_input: torch.Tensor,      # [B, 1, 288, 288]
         has_mask_input: torch.Tensor,  # [B]
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -270,44 +272,47 @@ class TrackerDecoderWrapper(nn.Module):
         # Step 2: Add no_mem_embed to main embedding (broadcasts over spatial dims)
         image_embed = fpn_feat_2 + self.no_mem_embed  # [B, 256, 72, 72]
 
-        # Step 3: Encode point prompts
-        sparse_embeddings, _ = self.sam_prompt_encoder(
-            points=(point_coords, point_labels),
-            boxes=None,
-            masks=None,
+        # Step 3: Encode point prompts using HuggingFace interface
+        # HuggingFace expects: input_points [B, num_objects, num_points, 2]
+        #                      input_labels [B, num_objects, num_points]
+        sparse_embeddings, dense_embeddings_no_mask = self.prompt_encoder(
+            input_points=point_coords,
+            input_labels=point_labels.long(),  # Labels must be long/int
+            input_boxes=None,
+            input_masks=None,
         )
 
         # Step 4: Handle mask input for refinement
-        dense_embeddings_from_mask = self.sam_prompt_encoder._embed_masks(mask_input)
-        no_mask_embed = self.sam_prompt_encoder.no_mask_embed.weight.reshape(1, -1, 1, 1)
+        # When has_mask_input is True, encode the mask; otherwise use no_mask_embed
+        mask_embed = self.prompt_encoder.mask_embed(mask_input)  # [B, 256, 72, 72]
+        no_mask_embed = self.prompt_encoder.no_mask_embed.weight.reshape(1, -1, 1, 1)
         no_mask_embed = no_mask_embed.expand(B, -1, self.EMBED_SIZE, self.EMBED_SIZE)
 
         # Select based on has_mask_input
         has_mask = has_mask_input.view(-1, 1, 1, 1).float()
-        dense_embeddings = has_mask * dense_embeddings_from_mask + (1 - has_mask) * no_mask_embed
+        dense_embeddings = has_mask * mask_embed + (1 - has_mask) * no_mask_embed
 
-        # Step 5: Get position encoding
-        image_pe = self.sam_prompt_encoder.get_dense_pe()
+        # Step 5: Get position encoding (repeat for batch size)
+        image_pe = self.image_pe.expand(B, -1, -1, -1)
 
         # Step 6: Run mask decoder
         high_res_features = [high_res_feats_0, high_res_feats_1]
 
-        low_res_multimasks, iou_pred, _, object_score_logits = self.sam_mask_decoder(
+        # HuggingFace mask decoder outputs: [B, num_objects, num_masks, H, W]
+        low_res_multimasks, iou_pred, _, object_score_logits = self.mask_decoder(
             image_embeddings=image_embed,
-            image_pe=image_pe,
+            image_positional_embeddings=image_pe,
             sparse_prompt_embeddings=sparse_embeddings,
             dense_prompt_embeddings=dense_embeddings,
             multimask_output=self.multimask_output,
-            repeat_image=False,
-            high_res_features=high_res_features,
+            high_resolution_features=high_res_features,
         )
 
-        # Note: The mask decoder already handles multimask_output internally:
-        # - multimask_output=True: returns masks[:, 1:, :, :] which is [B, 3, H, W]
-        # - multimask_output=False: returns masks[:, 0:1, :, :] which is [B, 1, H, W]
-        # So we DON'T need to slice again here.
-        low_res_masks = low_res_multimasks
-        iou_predictions = iou_pred
+        # Squeeze out the num_objects dimension (we only support 1 object for simplicity)
+        # Input: [B, 1, 3, 288, 288] -> Output: [B, 3, 288, 288]
+        low_res_masks = low_res_multimasks.squeeze(1)  # [B, num_masks, H, W]
+        iou_predictions = iou_pred.squeeze(1)  # [B, num_masks]
+        object_score_logits = object_score_logits.squeeze(1)  # [B, 1]
 
         # Step 8: Upsample to image size
         high_res_masks = F.interpolate(
@@ -622,25 +627,25 @@ def export_tracker_decoder(
     print("Exporting Tracker Decoder")
     print(f"{'='*60}")
 
+    # For HuggingFace Sam3TrackerModel, pass the whole model
     wrapper = TrackerDecoderWrapper(
-        sam_prompt_encoder=tracker_model.sam_prompt_encoder,
-        sam_mask_decoder=tracker_model.sam_mask_decoder,
-        no_mem_embed=tracker_model.no_mem_embed,
+        sam3_tracker_model=tracker_model,
         multimask_output=True,
     ).to(device).eval()
 
     output_path = output_dir / "tracker-decoder.onnx"
 
-    # Dummy inputs
+    # Dummy inputs - HuggingFace uses [B, num_objects, num_points, 2] for points
     batch_size = 1
+    num_objects = 1
     num_points = 2
 
     dummy_inputs = {
         "fpn_feat_0": torch.randn(batch_size, 256, 288, 288, device=device),
         "fpn_feat_1": torch.randn(batch_size, 256, 144, 144, device=device),
         "fpn_feat_2": torch.randn(batch_size, 256, 72, 72, device=device),
-        "point_coords": torch.randint(0, 1008, (batch_size, num_points, 2), dtype=torch.float32, device=device),
-        "point_labels": torch.ones(batch_size, num_points, dtype=torch.float32, device=device),
+        "point_coords": torch.randint(0, 1008, (batch_size, num_objects, num_points, 2), dtype=torch.float32, device=device),
+        "point_labels": torch.ones(batch_size, num_objects, num_points, dtype=torch.float32, device=device),
         "mask_input": torch.zeros(batch_size, 1, 288, 288, dtype=torch.float32, device=device),
         "has_mask_input": torch.zeros(batch_size, dtype=torch.float32, device=device),
     }
@@ -662,8 +667,8 @@ def export_tracker_decoder(
                 "fpn_feat_0": {0: "batch"},
                 "fpn_feat_1": {0: "batch"},
                 "fpn_feat_2": {0: "batch"},
-                "point_coords": {0: "batch", 1: "num_points"},
-                "point_labels": {0: "batch", 1: "num_points"},
+                "point_coords": {0: "batch", 1: "num_objects", 2: "num_points"},
+                "point_labels": {0: "batch", 1: "num_objects", 2: "num_points"},
                 "mask_input": {0: "batch"},
                 "has_mask_input": {0: "batch"},
                 "masks": {0: "batch"},
@@ -850,21 +855,19 @@ def verify_tracker_decoder(
     providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if device == 'cuda' else ['CPUExecutionProvider']
     session = ort.InferenceSession(str(onnx_path), providers=providers)
 
-    # Create wrapper
+    # Create wrapper using HuggingFace Sam3TrackerModel
     wrapper = TrackerDecoderWrapper(
-        sam_prompt_encoder=tracker_model.sam_prompt_encoder,
-        sam_mask_decoder=tracker_model.sam_mask_decoder,
-        no_mem_embed=tracker_model.no_mem_embed,
+        sam3_tracker_model=tracker_model,
         multimask_output=True,
     ).to(device).eval()
 
-    # Test inputs
+    # Test inputs - HuggingFace uses [B, num_objects, num_points, 2] for points
     test_inputs = {
         "fpn_feat_0": torch.randn(1, 256, 288, 288, device=device),
         "fpn_feat_1": torch.randn(1, 256, 144, 144, device=device),
         "fpn_feat_2": torch.randn(1, 256, 72, 72, device=device),
-        "point_coords": torch.tensor([[[500.0, 500.0]]], device=device),
-        "point_labels": torch.tensor([[1.0]], device=device),
+        "point_coords": torch.tensor([[[[500.0, 500.0]]]], device=device),  # [B, num_objects, num_points, 2]
+        "point_labels": torch.tensor([[[1.0]]], device=device),  # [B, num_objects, num_points]
         "mask_input": torch.zeros(1, 1, 288, 288, device=device),
         "has_mask_input": torch.tensor([0.0], device=device),
     }
@@ -919,27 +922,17 @@ def main():
     device = args.device if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    # Load HuggingFace model
-    print(f"\nLoading HuggingFace SAM3 from {args.model_path}...")
-    from transformers import Sam3Model
-    hf_model = Sam3Model.from_pretrained(args.model_path).to(device).eval()
+    # Load HuggingFace Sam3TrackerModel (NOT Sam3Model - they have different weights!)
+    # Sam3TrackerModel has 685 params, Sam3Model has 1468 params (includes video memory)
+    print(f"\nLoading HuggingFace Sam3TrackerModel from {args.model_path}...")
+    from transformers import Sam3TrackerModel
+    hf_model = Sam3TrackerModel.from_pretrained(args.model_path).to(device).eval()
 
-    # Load official SAM3 tracker for tracker decoder export
+    # For tracker decoder, we use the HuggingFace model directly now
     tracker_model = None
     if args.all or args.tracker_decoder or args.verify:
-        print("\nLoading official SAM3 tracker for decoder weights...")
-        import sys
-        sys.path.insert(0, '/home/jahs/GitHub/cvat/sam3')
-        from sam3.model_builder import build_sam3_image_model
-
-        sam3_full = build_sam3_image_model(
-            device=device,
-            eval_mode=True,
-            load_from_HF=True,
-            enable_segmentation=False,
-            enable_inst_interactivity=True,
-        )
-        tracker_model = sam3_full.inst_interactive_predictor.model
+        # Sam3TrackerModel has the tracker components we need
+        tracker_model = hf_model
 
     # Export components
     if args.all or args.vision_encoder:

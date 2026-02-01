@@ -22,7 +22,7 @@ metadata:
     help_message: |
       Unified SAM3 supporting interactor, detector, and tracker modes.
       Uses a single model load to save GPU memory (~8GB VRAM).
-      
+
       Modes:
       - encode: Point/box prompts for browser-side mask decoding
       - text-to-segment: Text prompts for automatic detection
