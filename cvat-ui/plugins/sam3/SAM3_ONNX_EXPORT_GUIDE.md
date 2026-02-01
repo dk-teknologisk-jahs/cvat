@@ -1,27 +1,146 @@
-# SAM3 ONNX Export Guide: Matching SAM2 Functionality
+# SAM3 ONNX Export Guide
 
-This document describes how to export SAM3-Tracker ONNX models that match SAM2's browser-side decoder functionality, including mask refinement and in-model interpolation.
-
----
-
-## Quick Reference: Current Working Implementation
+This document describes SAM3 architecture and ONNX export strategies for CVAT integration.
 
 > **Last Updated**: February 2026
 
-### Architecture Summary
+---
+
+## Table of Contents
+
+1. [SAM3 Architecture Overview](#sam3-architecture-overview)
+2. [Two Model Implementations](#two-model-implementations)
+3. [ONNX Export Methods](#onnx-export-methods)
+4. [Current Working Implementation](#current-working-implementation)
+
+---
+
+## SAM3 Architecture Overview
+
+SAM3 is a unified model for segmentation with multiple prompt types. All encoders are **completely independent** (no parameter sharing).
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            SAM3 MODEL (~840M params)                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────┐    ┌─────────────────────┐                        │
+│  │   VISION ENCODER    │    │    TEXT ENCODER     │                        │
+│  │    (454M params)    │    │   (354M params)     │                        │
+│  │  ViT + FPN neck     │    │  CLIP Text Model    │                        │
+│  └──────────┬──────────┘    └──────────┬──────────┘                        │
+│             │                          │                                    │
+│             │   ┌──────────────────────┴────────────┐                      │
+│             │   │  ┌─────────────────────────────┐  │                      │
+│             │   │  │    GEOMETRY ENCODER (8M)   │  │  (optional: boxes)   │
+│             │   │  └──────────────┬──────────────┘  │                      │
+│             │   │     ┌───────────┴───────────┐     │                      │
+│             │   └─────┤  combined_prompts     ├─────┘                      │
+│             │         └───────────┬───────────┘                            │
+│             │                     ▼                                        │
+│             └────────►┌───────────────────────┐                            │
+│                       │  DETR ENCODER (10M)   │  Cross-attention           │
+│                       └───────────┬───────────┘                            │
+│                                   ▼                                        │
+│                       ┌───────────────────────┐                            │
+│                       │  DETR DECODER (12M)   │  Object queries            │
+│                       └───────────┬───────────┘                            │
+│                                   │                                        │
+│             ┌─────────────────────┼─────────────────────┐                  │
+│             ▼                     ▼                     ▼                  │
+│  ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐          │
+│  │ DOT PRODUCT (1M)│   │    BOX HEAD     │   │ MASK DECODER(2M)│          │
+│  │  pred_logits    │   │   pred_boxes    │   │   pred_masks    │          │
+│  └─────────────────┘   └─────────────────┘   └─────────────────┘          │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Two Model Implementations
+
+SAM3 has two PyTorch implementations with **different ONNX export capabilities**:
+
+### 1. Official Facebook Repository (`sam3/`)
+
+- **RoPE Implementation**: Uses `torch.view_as_complex()`
+- **ONNX Export**: ❌ **Cannot export vision encoder** - `view_as_complex` not supported in ONNX
+- **Use Case**: PyTorch inference, training, server-side processing
+
+### 2. HuggingFace Transformers (`transformers.models.sam3`)
+
+- **RoPE Implementation**: Pre-computes cos/sin as buffers (ONNX-compatible)
+- **ONNX Export**: ✅ **Can export all components** including vision encoder
+- **Use Case**: ONNX export for browser/edge deployment
+
+**Key Difference**:
+```python
+# Official SAM3 (cannot export)
+freqs_cis = torch.view_as_complex(freqs_cis)  # ❌ Not supported in ONNX
+
+# HuggingFace (can export)
+self.register_buffer("rope_embeddings_cos", inv_freq.cos())  # ✅ ONNX compatible
+self.register_buffer("rope_embeddings_sin", inv_freq.sin())  # ✅ ONNX compatible
+```
+
+---
+
+## ONNX Export Methods
+
+### Method 1: usls Export Scripts (Full ONNX)
+
+Uses HuggingFace Transformers to export all components.
+
+**Location**: `usls/scripts/sam3-image/`
+
+```bash
+python export_v2.py --all \
+  --model-path facebook/sam3 \
+  --output-dir /tmp/sam3-onnx-export \
+  --device cuda \
+  --image-height 1008 --image-width 1008
+```
+
+**Output**:
+| File | Size | Description |
+|------|------|-------------|
+| `vision-encoder.onnx` | 1.8 GB | ViT + FPN backbone |
+| `text-encoder.onnx` | 1.4 GB | CLIP text encoder |
+| `decoder.onnx` | 124 MB | Geometry + DETR + Mask decoder |
+
+### Method 2: Custom Decoder Export (Interactor Mode)
+
+For point/box prompts with mask refinement.
+
+```bash
+python export_decoder_with_mask_input.py \
+  --output cvat-ui/plugins/sam3/assets/tracker-prompt-encoder-mask-decoder-with-mask-input.onnx
+```
+
+### Method 3: PyTorch Server-Side (Text-to-Segment)
+
+Text prompts use full PyTorch pipeline on server - no ONNX export needed.
+
+---
+
+## Current Working Implementation
 
 | Component | Location | Status |
 |-----------|----------|--------|
-| **PyTorch Encoder** | `serverless/pytorch/facebookresearch/sam3/nuclio/model_handler_pytorch.py` | ✅ Working |
-| **ONNX Decoder** | `cvat-ui/plugins/sam3/assets/tracker-prompt-encoder-mask-decoder-with-mask-input.onnx` | ✅ Working (16.3 MB) |
-| **Export Script** | `serverless/pytorch/facebookresearch/sam3/nuclio/export_sam3_onnx.py` | ✅ Complete |
-| **Test Suite** | `serverless/pytorch/facebookresearch/sam3/nuclio/test_sam3_multiclick.py` | ✅ 10/10 tests pass |
+| **PyTorch Encoder** | `model_handler_pytorch.py` | ✅ Working |
+| **ONNX Decoder** | `tracker-prompt-encoder-mask-decoder-with-mask-input.onnx` | ✅ Working (16.3 MB) |
+| **Text-to-Segment** | `model_handler_pcs.py` (PyTorch) | ✅ Working |
+| **Full ONNX Export** | `usls/scripts/sam3-image/` | ✅ Verified |
 
-### Why PyTorch Encoder (Not ONNX)?
+### Why Hybrid Approach?
 
-The SAM3 vision encoder **cannot be exported to ONNX** due to `view_as_complex` operations in the RoPE (Rotary Position Embedding) used by the ViT backbone. These complex number operations are not supported in ONNX opset 17+.
+**Interactor Mode** (point/box clicks):
+- Vision encoder: PyTorch on server (official repo has view_as_complex issue)
+- Decoder: ONNX in browser (fast interactive feedback)
 
-**Solution**: Use PyTorch for server-side image encoding, ONNX for browser-side decoding.
+**Text-to-Segment Mode**:
+- Full PyTorch pipeline on server
+- Returns complete masks (not embeddings)
 
 ### Key Implementation Details
 
@@ -950,3 +1069,55 @@ Or use WebGL/WebGPU for accelerated connected component labeling.
 4. ~~**Hole filling**: Implement morphological closing or connected component analysis~~ ✅ Implemented with union-find connected components, matching `max_hole_area=256`
 
 All major implementation gaps have been addressed!
+
+---
+
+## Appendix: Key Discovery - HuggingFace Transformers vs Official SAM3
+
+### Problem: Vision Encoder ONNX Export Fails
+
+The official Facebook SAM3 repository uses `torch.view_as_complex()` in the vision encoder's Rotary Position Embedding (RoPE):
+
+```python
+# Official SAM3 (sam3/model/image_encoder/image_encoder.py)
+freqs_cis = torch.view_as_complex(freqs_cis)  # ❌ Not supported in ONNX
+```
+
+This operation is **not supported in ONNX**, causing export to fail.
+
+### Solution: HuggingFace Transformers Implementation
+
+HuggingFace Transformers (v5.0.0+) includes an ONNX-compatible SAM3 implementation that pre-computes RoPE embeddings:
+
+```python
+# HuggingFace Transformers (transformers/models/sam3/modeling_sam3.py)
+class Sam3ViTRotaryEmbedding(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        # Pre-compute and register as buffers (ONNX-compatible)
+        self.register_buffer("rope_embeddings_cos", inv_freq.cos(), persistent=False)
+        self.register_buffer("rope_embeddings_sin", inv_freq.sin(), persistent=False)
+```
+
+### Verified: Full ONNX Export Works
+
+Using the `usls` export scripts with HuggingFace Transformers:
+
+```bash
+cd usls/scripts/sam3-image
+python export_v2.py --all --model-path facebook/sam3 --output-dir /tmp/sam3-onnx
+
+# Results:
+# vision-encoder.onnx  1.8 GB  ✅ Verified with ONNX Runtime
+# text-encoder.onnx    1.4 GB  ✅ Verified with ONNX Runtime
+# decoder.onnx         124 MB  ✅ Verified with ONNX Runtime
+```
+
+### Implications for CVAT
+
+| Mode | Current Implementation | Full ONNX Alternative |
+|------|----------------------|----------------------|
+| **Interactor** | PyTorch encoder + ONNX decoder | Full ONNX (usls export) |
+| **Text-to-Segment** | Full PyTorch | Full ONNX possible |
+
+For browser-side deployment or edge inference, the HuggingFace/usls ONNX models provide a complete solution.

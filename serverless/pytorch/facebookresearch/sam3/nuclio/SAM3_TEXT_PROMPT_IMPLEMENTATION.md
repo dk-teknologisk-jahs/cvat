@@ -378,6 +378,75 @@ This approach:
 - ✅ Single deployment to manage
 - ✅ Weights embedded in Docker image (no runtime auth needed)
 - ✅ Can still use ONNX vision encoder for interactor mode
+
+### 2026-02-XX - Key Discovery: HuggingFace vs Official SAM3
+
+**Goal:** Investigate GitHub issue #224 to understand how existing encoder ONNX models were created.
+
+**Key Finding:** There are TWO SAM3 implementations with different ONNX capabilities:
+
+| Implementation | RoPE Method | Vision Encoder ONNX |
+|----------------|-------------|---------------------|
+| Official Facebook (`sam3/`) | `view_as_complex()` | ❌ Not supported |
+| HuggingFace Transformers | Pre-computed buffers | ✅ Exportable |
+
+**Why Official SAM3 Can't Export Vision Encoder:**
+```python
+# sam3/model/image_encoder/image_encoder.py
+freqs_cis = torch.view_as_complex(freqs_cis)  # ❌ ONNX error
+```
+
+**Why HuggingFace Can Export:**
+```python
+# transformers/models/sam3/modeling_sam3.py
+class Sam3ViTRotaryEmbedding(nn.Module):
+    def __init__(self, config):
+        # Pre-compute during init, no view_as_complex at runtime
+        self.register_buffer("rope_embeddings_cos", inv_freq.cos())
+        self.register_buffer("rope_embeddings_sin", inv_freq.sin())
+```
+
+**Verified Working Export (usls scripts + HuggingFace):**
+```bash
+cd usls/scripts/sam3-image
+python export_v2.py --all --model-path facebook/sam3 --output-dir /tmp/sam3-onnx
+
+# Successfully exported:
+# vision-encoder.onnx  1.8 GB  ✅ Verified with ONNX Runtime
+# text-encoder.onnx    1.4 GB  ✅ Verified with ONNX Runtime
+# decoder.onnx         124 MB  ✅ Verified with ONNX Runtime
+```
+
+**SAM3 Architecture (All Encoders Independent):**
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      SAM3 (~840M params)                    │
+├─────────────────────────────────────────────────────────────┤
+│  Vision Encoder (454M)  ←─ independent ─→  Text Encoder (354M)  │
+│         │                                        │          │
+│         └────────────────┬───────────────────────┘          │
+│                          ▼                                  │
+│  [Optional Geometry Encoder (8M) for box prompts]           │
+│                          ▼                                  │
+│              DETR Encoder (10M) ← Cross-attention           │
+│                          ▼                                  │
+│              DETR Decoder (12M) ← Object queries            │
+│                          ▼                                  │
+│              Mask Decoder (2M) + Scoring (1M)               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Implications for CVAT:**
+
+| Mode | Current | Alternative |
+|------|---------|-------------|
+| **Interactor** (clicks/boxes) | PyTorch encoder + ONNX decoder | Full ONNX (HuggingFace export) |
+| **Text-to-Segment** | Full PyTorch on server | Full ONNX possible |
+
+**Recommendations:**
+1. For server-side inference: Continue using official SAM3 repo (better documented, maintained)
+2. For browser/edge deployment: Use usls export scripts with HuggingFace Transformers
+3. Document both approaches in `SAM3_ONNX_EXPORT_GUIDE.md`
 ┌─────────────────────────────────────────────────────────────┐
 │                    Nuclio Function                           │
 │  ┌─────────────────────────────────────────────────────┐    │
