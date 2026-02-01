@@ -295,6 +295,74 @@ Fixed `bpe()` function to match SimpleTokenizer: `word = tuple(token[:-1]) + (to
 ✅ Backend support for text prompts
 ✅ Frontend text prompt UI
 ✅ CVAT detector response format
+✅ Local handler test verified (5 detections on bus.jpg)
 🔄 Integration testing needed
 
+### Next Steps for Integration Testing
 
+1. **Deploy the Nuclio function:**
+   ```bash
+   nuctl deploy --project-name cvat \
+     --path /home/jahs/GitHub/cvat/serverless/pytorch/facebookresearch/sam3/nuclio \
+     --file function_pcs.yaml \
+     --platform local
+   ```
+
+2. **Build CVAT with changes:**
+   ```bash
+   # Frontend
+   cd cvat-ui && yarn build
+   
+   # Backend has Python changes - restart server
+   ```
+
+3. **Test in CVAT:**
+   - Open a task with images
+   - Go to AI Tools → Detectors
+   - Select "SAM3 Text-to-Segment" model
+   - Enter text prompts like "person, car"
+   - Click Annotate
+   - Verify masks are created
+
+4. **Verify labels:**
+   - Masks should have labels matching the text prompts
+   - For new labels, CVAT may need to create them or warn
+
+### Architecture Summary
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        CVAT UI                               │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │ detector-runner.tsx                                 │    │
+│  │ - Shows text prompt input when supportsTextPrompt   │    │
+│  │ - Splits comma-separated prompts into array         │    │
+│  │ - Sends text_prompts[] + threshold to backend       │    │
+│  └─────────────────────────────────────────────────────┘    │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ POST /api/lambda/functions/{id}
+                               │ { text_prompts: ["person", "car"], threshold: 0.5 }
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      CVAT Backend                            │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │ views.py                                            │    │
+│  │ - Parses supports_text_prompt annotation            │    │
+│  │ - Skips label mapping for text-based detection      │    │
+│  │ - Passes text_prompts to Nuclio function            │    │
+│  │ - Returns DetectedShape[] directly to UI            │    │
+│  └─────────────────────────────────────────────────────┘    │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ Nuclio invoke
+                               │ { image, text_prompts, threshold }
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Nuclio Function                           │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │ main_pcs.py + model_handler_pcs.py                  │    │
+│  │ - Loads SAM3 model with PyTorch                     │    │
+│  │ - Runs text-to-segment pipeline                     │    │
+│  │ - Returns: [{ type: "mask", label, mask: RLE }]     │    │
+│  └─────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+```
