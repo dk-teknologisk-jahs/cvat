@@ -2,19 +2,21 @@
 
 This document describes SAM3 architecture, ONNX export strategies, and how SAM3 covers **all three CVAT AI tool categories**: Interactor, Detector, and Tracker.
 
-> **Last Updated**: February 2026
+> **Last Updated**: 1 February 2026
 
 ---
 
 ## Table of Contents
 
 1. [Current Progress](#current-progress)
-2. [SAM3 Capabilities for CVAT](#sam3-capabilities-for-cvat)
-3. [SAM3 Architecture Overview](#sam3-architecture-overview)
-4. [Two Model Implementations](#two-model-implementations)
-5. [ONNX Export Methods](#onnx-export-methods)
-6. [Unified HuggingFace ONNX Export (Recommended)](#unified-huggingface-onnx-export-recommended)
-7. [Current Working Implementation](#current-working-implementation)
+2. [Implementation Plan](#implementation-plan)
+3. [Reference Implementations](#reference-implementations)
+4. [SAM3 Capabilities for CVAT](#sam3-capabilities-for-cvat)
+5. [SAM3 Architecture Overview](#sam3-architecture-overview)
+6. [Two Model Implementations](#two-model-implementations)
+7. [ONNX Export Methods](#onnx-export-methods)
+8. [Unified HuggingFace ONNX Export (Recommended)](#unified-huggingface-onnx-export-recommended)
+9. [Current Working Implementation](#current-working-implementation)
 
 ---
 
@@ -39,6 +41,7 @@ We are migrating from a hybrid approach (external vision encoder + custom decode
 
 | Task | Status | Notes |
 |------|--------|-------|
+| Unified nuclio function | 🔄 Planning | Single function for interactor + detector + tracker |
 | Browser integration | 🔄 Pending | Update to use 256ch vision encoder outputs |
 | End-to-end testing | 🔄 Pending | Test full pipeline with real images |
 | Model deployment | 🔄 Pending | Copy ONNX files to appropriate locations |
@@ -52,6 +55,8 @@ We are migrating from a hybrid approach (external vision encoder + custom decode
 3. **no_mem_embed Fix**: Shape is `[1, 1, 256]`, must be reshaped to `[1, 256, 1, 1]` for spatial broadcast.
 
 4. **Multimask Output**: Mask decoder with `multimask_output=True` already slices internally - no additional slicing needed.
+
+5. **CVAT Tracker Interface**: Existing trackers (SiamMask, TransT) use stateless per-request pattern with jsonpickle-serialized state. SAM3 video tracking memory bank is too large for this approach - use Redis instead.
 
 #### Verification Results
 
@@ -67,12 +72,159 @@ Text Encoder:
   text_mask:     MAE=0.00000000, MaxDiff=0.00000000 ✓ PASS
 ```
 
-#### Next Steps
+---
 
-1. **Browser Integration**: Update `cvat-ui/plugins/sam3/src/ts/inference.worker.ts` to accept 256ch inputs
-2. **Deploy Models**: Copy exported ONNX files to `cvat-ui/plugins/sam3/assets/`
-3. **Server Integration**: Update `model_handler_pytorch.py` to use new vision encoder
-4. **Testing**: Run full end-to-end tests with real images in CVAT
+## Implementation Plan
+
+### Goal: Unified SAM3 Nuclio Function
+
+Create a **single nuclio function** that handles all three CVAT AI tool types, saving GPU VRAM by loading the model once (~3.5 GB vs ~7 GB for separate functions).
+
+### Model Deployment Strategy
+
+| Model | Size | Location | Purpose |
+|-------|------|----------|---------|
+| **Vision Encoder** | 1.8 GB | `serverless/.../sam3/nuclio/` | Encode images (server) |
+| **Text Encoder** | 1.3 GB | `serverless/.../sam3/nuclio/` | PCS text prompts (server) |
+| **PCS Decoder** | 123 MB | `serverless/.../sam3/nuclio/` | Text→segment (server) |
+| **Tracker Decoder** | 16 MB | `cvat-ui/plugins/sam3/assets/` | Click/box interactor (browser) |
+
+### Unified Function Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    SAM3 UNIFIED NUCLIO FUNCTION                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Request routing by 'mode' parameter:                                       │
+│                                                                             │
+│  mode="encode"           → Interactor (returns embeddings for browser)      │
+│  mode="text-to-segment"  → Detector (returns masks + boxes)                 │
+│  mode="track/init"       → Tracker init (Redis session, returns mask)       │
+│  mode="track/frame"      → Tracker propagate (Redis state, returns mask)    │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  HuggingFace Models (lazy loaded, shared backbone):                         │
+│                                                                             │
+│  ┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐  │
+│  │   Sam3Model         │  │  Sam3TrackerModel   │  │  Sam3VideoModel     │  │
+│  │   (PCS/Detector)    │  │  (PVS/Interactor)   │  │  (Video Tracker)    │  │
+│  └─────────────────────┘  └─────────────────────┘  └─────────────────────┘  │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  State Management:                                                          │
+│  - Interactor: Stateless (embeddings sent to browser)                       │
+│  - Detector: Stateless (masks returned immediately)                         │
+│  - Tracker: Redis-backed session state (memory bank too large for request)  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Implementation Steps
+
+1. **Update `sam3-unified` function** to add video tracking mode
+   - Add Redis dependency for session state
+   - Lazy load `Sam3VideoModel` only when tracking is used
+   - Implement CVAT tracker interface (`shapes` + `states` format)
+
+2. **Browser Integration** for interactor mode
+   - Update `inference.worker.ts` to accept 256ch vision encoder outputs
+   - Deploy tracker decoder ONNX to plugin assets
+
+3. **End-to-End Testing**
+   - Test interactor mode (clicks → mask)
+   - Test detector mode (text prompts → all instances)
+   - Test tracker mode (propagate masks across frames)
+
+### CVAT Tracker Interface Compatibility
+
+Existing CVAT trackers (SiamMask, TransT) use this request/response format:
+
+```python
+# Request (per frame):
+{
+    "image": "<base64 frame>",
+    "shapes": [[x1, y1, x2, y2], ...],  # Bounding boxes
+    "states": [{"key": "value"}, ...]    # Serialized state per object
+}
+
+# Response:
+{
+    "shapes": [[x1, y1, x2, y2], ...],  # Updated shapes
+    "states": [{"key": "value"}, ...]    # Updated state
+}
+```
+
+For SAM3, the `states` will contain a Redis session ID instead of the full memory bank:
+```python
+states = [{"session_id": "sam3_track_12345", "object_id": 1}, ...]
+```
+
+---
+
+## Reference Implementations
+
+### cvat-yoloe-sam (Full SAM3 with HuggingFace)
+
+**Location**: `/home/jahs/GitHub/cvat/cvat-yoloe-sam/`
+
+A reference CVAT fork with comprehensive SAM3 implementation using HuggingFace Transformers.
+
+**Key Files**:
+- `serverless/pytorch/facebookresearch/sam3/nuclio/model_handler.py` - Full SAM3 handler
+- `serverless/pytorch/facebookresearch/sam3/nuclio/main.py` - Multi-endpoint routing
+- `serverless/pytorch/facebookresearch/sam3/nuclio/function-gpu.yaml` - Nuclio config
+
+**Features**:
+- Lazy loading of Sam3Model, Sam3TrackerModel, Sam3VideoModel
+- Redis caching for embeddings and tracking state
+- Multiple endpoints: `/segment-text`, `/segment-box`, `/segment-points`, `/detect`, `/track/*`
+- HuggingFace token support for gated models
+
+**HuggingFace Models Used**:
+```python
+from transformers import Sam3Model, Sam3Processor
+from transformers import Sam3TrackerModel, Sam3TrackerProcessor
+from transformers import Sam3VideoModel, Sam3VideoProcessor
+```
+
+### Existing CVAT Trackers
+
+**SiamMask** (`serverless/pytorch/foolwood/siammask/nuclio/`):
+- Returns polygon shapes (not just boxes)
+- State serialized with jsonpickle
+- ~100MB model size
+
+**TransT** (`serverless/pytorch/dschoerk/transt/nuclio/`):
+- Returns bounding boxes
+- State includes template features and position
+- ~50MB model size
+
+**Key Pattern**: Both use stateless request/response with all state serialized in the response. This works because their state is small (~MB). SAM3 video tracking has GB-scale memory banks, so we use Redis.
+
+### usls ONNX Export Scripts
+
+**Location**: `/home/jahs/GitHub/cvat/usls/scripts/sam3-image/`
+
+Rust ONNX runtime with Python export scripts using HuggingFace Transformers.
+
+**Key Files**:
+- `export_v2.py` - Main export script (use this for ONNX export)
+
+**Usage**:
+```bash
+python export_v2.py --all --model-path facebook/sam3 --output-dir /tmp/sam3-onnx
+```
+
+### Official SAM3 Repository
+
+**Location**: `/home/jahs/GitHub/cvat/sam3/`
+
+Official Facebook SAM3 PyTorch implementation.
+
+**⚠️ Important**: Cannot export vision encoder to ONNX due to `torch.view_as_complex()` in RoPE. Use HuggingFace Transformers implementation instead.
 
 ---
 
@@ -131,23 +283,24 @@ SAM3 is a **unified foundation model** that supports all three CVAT AI tool cate
 
 | Function | Path | Type | GPU VRAM |
 |----------|------|------|----------|
+| **SAM3 Unified (Recommended)** | `serverless/pytorch/facebookresearch/sam3-unified/` | interactor+detector+tracker | ~3.5GB |
 | SAM3 Interactor (ONNX) | `serverless/onnx/facebookresearch/sam3/` | interactor | ~2GB |
 | SAM3 PCS (PyTorch) | `serverless/pytorch/facebookresearch/sam3-pcs/` | detector | ~3.5GB |
-| SAM3 Unified | `serverless/pytorch/facebookresearch/sam3-unified/` | interactor+detector | ~3.5GB |
-| SAM3 Tracker | `serverless/pytorch/facebookresearch/sam3-tracker/` | tracker | ~3.5GB |
 
 ### Memory-Efficient Deployment
 
-To minimize GPU VRAM usage, use the **unified function** which loads the model once:
+Use the **unified function** for all three capabilities with a single model load:
 
 ```bash
-# Recommended: Single function for interactor + detector
+# Recommended: Single function for interactor + detector + tracker
 ./serverless/deploy_gpu.sh serverless/pytorch/facebookresearch/sam3-unified
-
-# Or separate functions (higher VRAM, more isolation)
-./serverless/deploy_gpu.sh serverless/onnx/facebookresearch/sam3
-./serverless/deploy_gpu.sh serverless/pytorch/facebookresearch/sam3-pcs
 ```
+
+The unified function routes requests by `mode` parameter:
+- `mode="encode"` → Interactor (returns embeddings for browser ONNX decoder)
+- `mode="text-to-segment"` → Detector (returns masks + boxes)
+- `mode="track/init"` → Video tracker init (Redis session)
+- `mode="track/frame"` → Video tracker propagate (Redis state)
 
 ---
 
