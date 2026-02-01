@@ -3,14 +3,14 @@
 # SPDX-License-Identifier: MIT
 
 metadata:
-  name: pth-facebookresearch-sam3-tracker
+  name: onnx-facebookresearch-sam3-tracker
   namespace: cvat
   annotations:
     name: Segment Anything 3
-    version: 2
+    version: 1
     type: interactor
     spec:
-    min_pos_points: 0
+    min_pos_points: 1
     min_neg_points: 0
     startswith_box_optional: true
     animated_gif: https://raw.githubusercontent.com/cvat-ai/cvat/develop/site/content/en/images/hrnet_example.gif
@@ -26,14 +26,11 @@ spec:
       value: /opt/nuclio/sam3
 
   build:
-    image: cvat.pth.facebookresearch.sam3.tracker:latest-gpu
-    baseImage: nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+    image: cvat.onnx.facebookresearch.sam3.tracker
+    baseImage: ubuntu:22.04
 
     directives:
       preCopy:
-      # set NVIDIA container runtime settings
-        - kind: ENV
-          value: NVIDIA_VISIBLE_DEVICES=all
       # disable interactive frontend
         - kind: ENV
           value: DEBIAN_FRONTEND=noninteractive
@@ -43,11 +40,10 @@ spec:
       # install basic deps
         - kind: RUN
           value: apt-get update && apt-get -y install curl git python3 python3-pip ffmpeg libsm6 libxext6
-      # install Python deps
+      # install Python deps (CPU-only onnxruntime)
         - kind: RUN
-          value: pip3 install numpy pillow onnxruntime-gpu
-      # download SAM3-Tracker ONNX encoder from HuggingFace (full precision for max accuracy)
-      # Note: The ONNX model internally references 'vision_encoder.onnx_data' as external data
+          value: pip3 install numpy pillow onnxruntime
+      # download SAM3-Tracker ONNX encoder from HuggingFace (full precision)
         - kind: RUN
           value: |
             curl -L -o vision_encoder.onnx "https://huggingface.co/onnx-community/sam3-tracker-ONNX/resolve/main/onnx/vision_encoder.onnx" && \
@@ -58,15 +54,11 @@ spec:
 
   triggers:
     myHttpTrigger:
-      maxWorkers: 1
+      maxWorkers: 2
       kind: 'http'
       workerAvailabilityTimeoutMilliseconds: 10000
       attributes:
         maxRequestBodySize: 67108864 # 64MB for large embeddings
-
-  resources:
-    limits:
-      nvidia.com/gpu: 1
 
   platform:
     attributes:

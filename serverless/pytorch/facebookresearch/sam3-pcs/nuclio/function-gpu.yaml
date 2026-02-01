@@ -8,7 +8,7 @@ metadata:
   annotations:
     name: SAM3 Text-to-Segment
     version: 1
-    type: detector  # Returns masks directly, not an interactor
+    type: detector
     spec:
     framework: pytorch
     supports_text_prompt: true
@@ -18,17 +18,20 @@ spec:
   description: Text-to-segment with Segment Anything 3 (SAM3 PCS mode)
   runtime: 'python:3.10'
   handler: main_pcs:handler
-  eventTimeout: 120s  # Longer timeout for full inference
+  eventTimeout: 120s
   env:
     - name: PYTHONPATH
       value: /opt/nuclio/sam3:/opt/nuclio
 
   build:
-    image: cvat.pth.facebookresearch.sam3.pcs
+    image: cvat.pth.facebookresearch.sam3.pcs:latest-gpu
     baseImage: nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
     directives:
       preCopy:
+      # set NVIDIA container runtime settings
+        - kind: ENV
+          value: NVIDIA_VISIBLE_DEVICES=all
       # disable interactive frontend
         - kind: ENV
           value: DEBIAN_FRONTEND=noninteractive
@@ -44,10 +47,10 @@ spec:
       # install Python deps
         - kind: RUN
           value: pip3 install numpy pillow pycocotools
-      # install SAM3 from HuggingFace
+      # install SAM3 from GitHub
         - kind: RUN
           value: pip3 install git+https://github.com/facebookresearch/sam3.git
-      # pre-download SAM3 checkpoint (will be cached)
+      # pre-download SAM3 checkpoint (will be cached in image)
         - kind: RUN
           value: |
             python3 -c "from huggingface_hub import hf_hub_download; hf_hub_download('facebook/sam3', 'sam3.pt')"
@@ -57,11 +60,15 @@ spec:
 
   triggers:
     myHttpTrigger:
-      maxWorkers: 1  # GPU-heavy, limit concurrent workers
+      maxWorkers: 1
       kind: 'http'
       workerAvailabilityTimeoutMilliseconds: 30000
       attributes:
-        maxRequestBodySize: 67108864 # 64MB for large images
+        maxRequestBodySize: 67108864
+
+  resources:
+    limits:
+      nvidia.com/gpu: 1
 
   platform:
     attributes:
@@ -69,7 +76,3 @@ spec:
         name: always
         maximumRetryCount: 3
       mountMode: volume
-
-  resources:
-    limits:
-      nvidia.com/gpu: 1
