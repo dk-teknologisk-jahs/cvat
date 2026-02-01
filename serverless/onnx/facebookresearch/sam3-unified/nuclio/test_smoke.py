@@ -111,12 +111,13 @@ def test_tracker_decoder(model_path: Path) -> bool:
         return False
 
     # Test inputs
+    # Note: HuggingFace SAM3 expects 4D point_coords [B, num_objects, num_points, 2]
     test_inputs = {
         "fpn_feat_0": np.random.randn(1, 256, 288, 288).astype(np.float32),
         "fpn_feat_1": np.random.randn(1, 256, 144, 144).astype(np.float32),
         "fpn_feat_2": np.random.randn(1, 256, 72, 72).astype(np.float32),
-        "point_coords": np.array([[[504.0, 504.0]]], dtype=np.float32),
-        "point_labels": np.array([[1.0]], dtype=np.float32),
+        "point_coords": np.array([[[[504.0, 504.0]]]], dtype=np.float32),  # [B, num_objects, num_points, 2]
+        "point_labels": np.array([[[1.0]]], dtype=np.float32),  # [B, num_objects, num_points]
         "mask_input": np.zeros((1, 1, 288, 288), dtype=np.float32),
         "has_mask_input": np.array([0.0], dtype=np.float32),
     }
@@ -172,9 +173,9 @@ def test_text_encoder(model_path: Path) -> bool:
         print_fail(f"Load failed: {e}")
         return False
 
-    # Test inputs (fake tokens)
+    # Test inputs (fake tokens) - SAM3 uses 32 token context length
     batch_size = 1
-    seq_len = 77
+    seq_len = 32  # SAM3 context length, not CLIP's 77
     test_inputs = {
         "input_ids": np.ones((batch_size, seq_len), dtype=np.int64),
         "attention_mask": np.ones((batch_size, seq_len), dtype=np.int64),

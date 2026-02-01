@@ -48,16 +48,24 @@ REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", "")
 REDIS_TTL = int(os.environ.get("REDIS_TTL", "3600"))  # 1 hour
 
-# Model paths from environment
-MODEL_DIR = os.environ.get("SAM3_MODEL_DIR", "/opt/nuclio/sam3/models")
-VISION_ENCODER_PATH = os.environ.get("SAM3_VISION_ENCODER", f"{MODEL_DIR}/vision_encoder.onnx")
-TEXT_ENCODER_PATH = os.environ.get("SAM3_TEXT_ENCODER", f"{MODEL_DIR}/text_encoder.onnx")
-PCS_DECODER_PATH = os.environ.get("SAM3_PCS_DECODER", f"{MODEL_DIR}/pcs_decoder.onnx")
-TRACKER_DECODER_PATH = os.environ.get("SAM3_TRACKER_DECODER", f"{MODEL_DIR}/tracker_decoder.onnx")
+# Default model directory (can be overridden by environment or constructor)
+DEFAULT_MODEL_DIR = "/opt/nuclio/sam3/models"
 
 # Constants
 SAM3_IMAGE_SIZE = 1008
 DEFAULT_CONFIDENCE_THRESHOLD = 0.3
+
+
+def get_model_paths(model_dir: Optional[str] = None) -> Dict[str, str]:
+    """Get model paths from environment or provided directory."""
+    base_dir = model_dir or os.environ.get("SAM3_MODEL_DIR", DEFAULT_MODEL_DIR)
+    return {
+        "model_dir": base_dir,
+        "vision_encoder": os.environ.get("SAM3_VISION_ENCODER", f"{base_dir}/vision_encoder.onnx"),
+        "text_encoder": os.environ.get("SAM3_TEXT_ENCODER", f"{base_dir}/text_encoder.onnx"),
+        "pcs_decoder": os.environ.get("SAM3_PCS_DECODER", f"{base_dir}/pcs_decoder.onnx"),
+        "tracker_decoder": os.environ.get("SAM3_TRACKER_DECODER", f"{base_dir}/tracker_decoder.onnx"),
+    }
 
 
 class RedisCache:
@@ -140,11 +148,14 @@ class UnifiedModelHandler:
     All inference uses ONNX Runtime - no HuggingFace auth needed!
     """
 
-    def __init__(self, device: str = "cuda"):
+    def __init__(self, device: str = "cuda", model_dir: Optional[str] = None):
         import onnxruntime as ort
 
         self.device = device
         self.cache = RedisCache()
+
+        # Get model paths dynamically (supports environment override or explicit path)
+        self.paths = get_model_paths(model_dir)
 
         # Configure ONNX Runtime providers
         if device == "cuda":
@@ -166,7 +177,7 @@ class UnifiedModelHandler:
         self.mean = np.array([0.5, 0.5, 0.5], dtype=np.float32)
         self.std = np.array([0.5, 0.5, 0.5], dtype=np.float32)
 
-        logger.info(f"UnifiedModelHandler initialized (device={device})")
+        logger.info(f"UnifiedModelHandler initialized (device={device}, model_dir={self.paths['model_dir']})")
 
     # =========================================================================
     # Lazy Model Loading
@@ -176,14 +187,15 @@ class UnifiedModelHandler:
         """Lazy load vision encoder ONNX model."""
         if self._vision_encoder is None:
             import onnxruntime as ort
-            if not os.path.exists(VISION_ENCODER_PATH):
+            path = self.paths["vision_encoder"]
+            if not os.path.exists(path):
                 raise FileNotFoundError(
-                    f"Vision encoder not found: {VISION_ENCODER_PATH}\n"
+                    f"Vision encoder not found: {path}\n"
                     "Run export_hf_onnx.py to export ONNX models."
                 )
-            logger.info(f"Loading vision encoder: {VISION_ENCODER_PATH}")
+            logger.info(f"Loading vision encoder: {path}")
             self._vision_encoder = ort.InferenceSession(
-                VISION_ENCODER_PATH,
+                path,
                 sess_options=self.sess_options,
                 providers=self.providers,
             )
@@ -193,14 +205,15 @@ class UnifiedModelHandler:
         """Lazy load text encoder ONNX model."""
         if self._text_encoder is None:
             import onnxruntime as ort
-            if not os.path.exists(TEXT_ENCODER_PATH):
+            path = self.paths["text_encoder"]
+            if not os.path.exists(path):
                 raise FileNotFoundError(
-                    f"Text encoder not found: {TEXT_ENCODER_PATH}\n"
+                    f"Text encoder not found: {path}\n"
                     "Run export_hf_onnx.py to export ONNX models."
                 )
-            logger.info(f"Loading text encoder: {TEXT_ENCODER_PATH}")
+            logger.info(f"Loading text encoder: {path}")
             self._text_encoder = ort.InferenceSession(
-                TEXT_ENCODER_PATH,
+                path,
                 sess_options=self.sess_options,
                 providers=self.providers,
             )
@@ -210,14 +223,15 @@ class UnifiedModelHandler:
         """Lazy load PCS decoder ONNX model."""
         if self._pcs_decoder is None:
             import onnxruntime as ort
-            if not os.path.exists(PCS_DECODER_PATH):
+            path = self.paths["pcs_decoder"]
+            if not os.path.exists(path):
                 raise FileNotFoundError(
-                    f"PCS decoder not found: {PCS_DECODER_PATH}\n"
+                    f"PCS decoder not found: {path}\n"
                     "Run export_hf_onnx.py to export ONNX models."
                 )
-            logger.info(f"Loading PCS decoder: {PCS_DECODER_PATH}")
+            logger.info(f"Loading PCS decoder: {path}")
             self._pcs_decoder = ort.InferenceSession(
-                PCS_DECODER_PATH,
+                path,
                 sess_options=self.sess_options,
                 providers=self.providers,
             )
@@ -227,14 +241,15 @@ class UnifiedModelHandler:
         """Lazy load tracker decoder ONNX model."""
         if self._tracker_decoder is None:
             import onnxruntime as ort
-            if not os.path.exists(TRACKER_DECODER_PATH):
+            path = self.paths["tracker_decoder"]
+            if not os.path.exists(path):
                 raise FileNotFoundError(
-                    f"Tracker decoder not found: {TRACKER_DECODER_PATH}\n"
+                    f"Tracker decoder not found: {path}\n"
                     "Run export_hf_onnx.py to export ONNX models."
                 )
-            logger.info(f"Loading tracker decoder: {TRACKER_DECODER_PATH}")
+            logger.info(f"Loading tracker decoder: {path}")
             self._tracker_decoder = ort.InferenceSession(
-                TRACKER_DECODER_PATH,
+                path,
                 sess_options=self.sess_options,
                 providers=self.providers,
             )
@@ -345,24 +360,37 @@ class UnifiedModelHandler:
         vision_outputs = [o.name for o in vision_encoder.get_outputs()]
         vision_features = vision_encoder.run(vision_outputs, {vision_input: input_tensor})
 
-        # Get fpn_feat_2 as the main image embedding
-        # Map by output names
-        fpn_feat_2 = None
-        for name, arr in zip(vision_outputs, vision_features):
-            if "feat_2" in name or name == "fpn_feat_2":
-                fpn_feat_2 = arr
-                break
-        if fpn_feat_2 is None:
-            fpn_feat_2 = vision_features[2]  # fallback to index
+        # Map vision outputs by name
+        vision_dict = dict(zip(vision_outputs, vision_features))
+        fpn_feat_0 = vision_dict.get("fpn_feat_0", vision_features[0])
+        fpn_feat_1 = vision_dict.get("fpn_feat_1", vision_features[1])
+        fpn_feat_2 = vision_dict.get("fpn_feat_2", vision_features[2])
+        fpn_pos_2 = vision_dict.get("fpn_pos_2", vision_features[3])
 
         # 2. Encode text prompts
-        # Text encoder expects tokenized input - we'll do simple tokenization
-        text_features = self._encode_text(text_encoder, text_prompts)
+        text_features, text_mask = self._encode_text(text_encoder, text_prompts)
 
-        # 3. Run PCS decoder
+        # Ensure text_mask is bool type for ONNX
+        text_mask = text_mask.astype(bool)
+
+        # 3. Run PCS decoder with all required inputs
+        # PCS decoder expects: fpn_feat_0, fpn_feat_1, fpn_feat_2, fpn_pos_2,
+        #                      text_features, text_mask, input_boxes, input_boxes_labels
+
+        # Use padding boxes (label=-10 means ignored/padding)
+        batch_size = text_features.shape[0]
+        input_boxes = np.zeros((batch_size, 1, 4), dtype=np.float32)
+        input_boxes_labels = np.full((batch_size, 1), -10, dtype=np.int64)
+
         pcs_inputs = {
-            pcs_decoder.get_inputs()[0].name: fpn_feat_2,  # image_embed
-            pcs_decoder.get_inputs()[1].name: text_features,  # text_features
+            "fpn_feat_0": fpn_feat_0,
+            "fpn_feat_1": fpn_feat_1,
+            "fpn_feat_2": fpn_feat_2,
+            "fpn_pos_2": fpn_pos_2,
+            "text_features": text_features,
+            "text_mask": text_mask,
+            "input_boxes": input_boxes,
+            "input_boxes_labels": input_boxes_labels,
         }
         pcs_output_names = [o.name for o in pcs_decoder.get_outputs()]
         pcs_outputs = pcs_decoder.run(pcs_output_names, pcs_inputs)
@@ -379,25 +407,75 @@ class UnifiedModelHandler:
         logger.info(f"Text-to-segment found {len(detections)} objects for '{text_prompts}'")
         return detections
 
-    def _encode_text(self, text_encoder, text_prompts: List[str]) -> np.ndarray:
-        """Encode text prompts using text encoder ONNX model."""
-        # Simple tokenization - in practice, use the same tokenizer as training
-        # For now, we assume the text encoder handles raw strings or pre-tokenized input
-        text_input_name = text_encoder.get_inputs()[0].name
+    def _get_tokenizer(self):
+        """Get or create a CLIP tokenizer for text encoding."""
+        if not hasattr(self, '_tokenizer'):
+            self._tokenizer = None
+            try:
+                # Try to use HuggingFace tokenizer (best option)
+                from transformers import CLIPTokenizer
+                self._tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+                self._tokenizer.model_max_length = 32  # SAM3 uses 32 context length
+                logger.info("Using HuggingFace CLIP tokenizer")
+            except ImportError:
+                logger.warning("transformers not available - using fallback tokenization")
+            except Exception as e:
+                logger.warning(f"Failed to load CLIP tokenizer: {e}")
+        return self._tokenizer
 
-        # Check input type - might be tokens or strings
+    def _encode_text(self, text_encoder, text_prompts: List[str]) -> Tuple[np.ndarray, np.ndarray]:
+        """Encode text prompts using text encoder ONNX model.
+
+        Returns:
+            Tuple of (text_features, text_mask)
+        """
+        text_input_name = text_encoder.get_inputs()[0].name
         text_input = text_encoder.get_inputs()[0]
+
+        # SAM3 uses 32 token context length
+        max_len = 32
+
         if text_input.type == "tensor(int64)":
-            # Needs tokenization - use simple placeholder for now
-            # In production, use transformers tokenizer
-            logger.warning("Text encoder expects tokenized input - using placeholder")
-            max_len = 77  # CLIP default
-            tokens = np.zeros((len(text_prompts), max_len), dtype=np.int64)
-            # Simple character-level encoding as fallback
-            for i, prompt in enumerate(text_prompts):
-                for j, char in enumerate(prompt[:max_len-1]):
-                    tokens[i, j+1] = ord(char) % 49407  # Vocab size
-            inputs = {text_input_name: tokens}
+            # Try to use proper CLIP tokenizer
+            tokenizer = self._get_tokenizer()
+            if tokenizer is not None:
+                # Use HuggingFace tokenizer
+                encoding = tokenizer(
+                    text_prompts,
+                    padding="max_length",
+                    truncation=True,
+                    max_length=max_len,
+                    return_tensors="np",
+                )
+                tokens = encoding["input_ids"]
+                attention_mask = encoding["attention_mask"]
+
+                # Check if attention_mask is needed
+                input_names = [inp.name for inp in text_encoder.get_inputs()]
+                if len(input_names) > 1 and "attention_mask" in input_names[1]:
+                    inputs = {
+                        text_input_name: tokens,
+                        input_names[1]: attention_mask,
+                    }
+                else:
+                    inputs = {text_input_name: tokens}
+            else:
+                # Fallback: simple character-level encoding
+                logger.warning("Using fallback character-level tokenization")
+                tokens = np.zeros((len(text_prompts), max_len), dtype=np.int64)
+                attention_mask = np.zeros((len(text_prompts), max_len), dtype=np.int64)
+                # SOT token at start
+                tokens[:, 0] = 49406  # <start_of_text>
+                attention_mask[:, 0] = 1
+                for i, prompt in enumerate(text_prompts):
+                    for j, char in enumerate(prompt[:max_len-2]):
+                        tokens[i, j+1] = ord(char) % 49407
+                        attention_mask[i, j+1] = 1
+                    # EOT token after text
+                    eot_pos = min(len(prompt)+1, max_len-1)
+                    tokens[i, eot_pos] = 49407  # <end_of_text>
+                    attention_mask[i, eot_pos] = 1
+                inputs = {text_input_name: tokens}
         else:
             # Assumes string input (unlikely for ONNX)
             inputs = {text_input_name: np.array(text_prompts)}
@@ -405,7 +483,11 @@ class UnifiedModelHandler:
         output_names = [o.name for o in text_encoder.get_outputs()]
         outputs = text_encoder.run(output_names, inputs)
 
-        return outputs[0]  # text_features
+        # Text encoder returns (text_features, text_mask)
+        text_features = outputs[0]
+        text_mask = outputs[1] if len(outputs) > 1 else attention_mask
+
+        return text_features, text_mask
 
     def _parse_pcs_outputs(
         self,
@@ -421,10 +503,13 @@ class UnifiedModelHandler:
         # Map outputs by name
         output_dict = dict(zip(output_names, outputs))
 
-        # Expected outputs: pred_boxes, pred_masks, scores (or similar)
-        boxes = output_dict.get("pred_boxes", output_dict.get("boxes", outputs[0]))
-        scores = output_dict.get("scores", output_dict.get("pred_scores", outputs[1] if len(outputs) > 1 else None))
-        masks = output_dict.get("pred_masks", output_dict.get("masks", outputs[2] if len(outputs) > 2 else None))
+        # PCS decoder outputs: pred_masks, pred_boxes, pred_logits, presence_logits
+        boxes = output_dict.get("pred_boxes", outputs[1])
+        logits = output_dict.get("pred_logits", outputs[2])  # These are the class logits
+        masks = output_dict.get("pred_masks", outputs[0])
+
+        # Convert logits to scores via sigmoid
+        scores = 1.0 / (1.0 + np.exp(-logits))  # sigmoid
 
         if scores is None:
             logger.warning("No scores in PCS output")
@@ -440,7 +525,8 @@ class UnifiedModelHandler:
 
         orig_w, orig_h = original_size
 
-        for i, score in enumerate(scores):
+        for i in range(len(scores)):
+            score = float(scores[i])
             if score < confidence_threshold:
                 continue
 
@@ -615,45 +701,67 @@ class UnifiedModelHandler:
         box: List[float],
         original_size: Tuple[int, int],
     ) -> Dict[str, Any]:
-        """Decode a box prompt to mask using tracker decoder."""
+        """
+        Decode a box prompt to mask using tracker decoder.
+
+        Converts the box to two points (top-left and bottom-right corners)
+        and runs the decoder to get a mask.
+        """
         decoder = self._get_tracker_decoder()
 
-        # Prepare inputs for tracker decoder
-        # The decoder expects: image_embed, box_coords, etc.
-        # This depends on the exact ONNX export format
+        # Get FPN features from embeddings
+        fpn_feat_0 = embeddings.get("fpn_feat_0")
+        fpn_feat_1 = embeddings.get("fpn_feat_1")
+        fpn_feat_2 = embeddings.get("fpn_feat_2")
 
-        # Get the main embedding
-        fpn_feat_2 = embeddings.get("fpn_feat_2", list(embeddings.values())[2])
+        if fpn_feat_0 is None or fpn_feat_1 is None or fpn_feat_2 is None:
+            logger.error("Missing FPN features in embeddings")
+            return {"mask": None, "box": box, "score": 0.0, "memory": None}
 
-        # Normalize box to [0, 1]
+        # Convert box [x1, y1, x2, y2] to point prompts
+        # For a box, we use two corner points with label=2 (box mode in SAM3)
+        # Alternatively, use center point with label=1 (positive click)
         orig_w, orig_h = original_size
-        box_normalized = np.array([[
-            box[0] / orig_w,
-            box[1] / orig_h,
-            box[2] / orig_w,
-            box[3] / orig_h,
-        ]], dtype=np.float32)
 
-        # Run decoder
+        # Scale box from original image coords to SAM3 coords (1008x1008)
+        scale_x = SAM3_IMAGE_SIZE / orig_w
+        scale_y = SAM3_IMAGE_SIZE / orig_h
+        box_scaled = [
+            box[0] * scale_x,
+            box[1] * scale_y,
+            box[2] * scale_x,
+            box[3] * scale_y,
+        ]
+
+        # Use center point as a positive click
+        center_x = (box_scaled[0] + box_scaled[2]) / 2
+        center_y = (box_scaled[1] + box_scaled[3]) / 2
+
+        # Prepare inputs - HuggingFace expects 4D point_coords [B, num_objects, num_points, 2]
+        point_coords = np.array([[[[center_x, center_y]]]], dtype=np.float32)
+        point_labels = np.array([[[1.0]]], dtype=np.float32)  # 1 = positive
+
+        inputs = {
+            "fpn_feat_0": fpn_feat_0,
+            "fpn_feat_1": fpn_feat_1,
+            "fpn_feat_2": fpn_feat_2,
+            "point_coords": point_coords,
+            "point_labels": point_labels,
+            "mask_input": np.zeros((1, 1, 288, 288), dtype=np.float32),
+            "has_mask_input": np.array([0.0], dtype=np.float32),
+        }
+
         try:
-            input_names = [inp.name for inp in decoder.get_inputs()]
-            output_names = [out.name for out in decoder.get_outputs()]
+            outputs = decoder.run(None, inputs)
 
-            # Build inputs based on what the decoder expects
-            inputs = {}
-            for inp in decoder.get_inputs():
-                if "embed" in inp.name.lower() or "feat" in inp.name.lower():
-                    inputs[inp.name] = fpn_feat_2
-                elif "box" in inp.name.lower():
-                    inputs[inp.name] = box_normalized
-                # Add other inputs as needed
+            # Parse outputs: masks [B,3,1008,1008], iou_predictions [B,3], low_res_masks [B,3,288,288]
+            masks = outputs[0]
+            iou_predictions = outputs[1]
 
-            outputs = decoder.run(output_names, inputs)
-
-            # Parse outputs
-            mask = outputs[0]  # Assuming first output is mask
-            if mask.ndim > 2:
-                mask = mask.squeeze()
+            # Select best mask based on IoU prediction
+            best_idx = int(np.argmax(iou_predictions[0]))
+            mask = masks[0, best_idx]  # [1008, 1008]
+            score = float(iou_predictions[0, best_idx])
 
             # Resize mask to original size
             if mask.shape != (orig_h, orig_w):
@@ -671,11 +779,11 @@ class UnifiedModelHandler:
             return {
                 "mask": mask_binary,
                 "box": new_box,
-                "score": 1.0,
-                "memory": fpn_feat_2,  # Use embeddings as memory for now
+                "score": score,
+                "memory": fpn_feat_2,  # Store embeddings for potential memory-based tracking
             }
         except Exception as e:
-            logger.error(f"Decoder failed: {e}")
+            logger.error(f"Decoder failed: {e}", exc_info=True)
             return {"mask": None, "box": box, "score": 0.0, "memory": None}
 
     def _track_with_memory(
@@ -698,22 +806,22 @@ class UnifiedModelHandler:
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about available models."""
         return {
-            "vision_encoder": os.path.exists(VISION_ENCODER_PATH),
-            "text_encoder": os.path.exists(TEXT_ENCODER_PATH),
-            "pcs_decoder": os.path.exists(PCS_DECODER_PATH),
-            "tracker_decoder": os.path.exists(TRACKER_DECODER_PATH),
-            "model_dir": MODEL_DIR,
+            "vision_encoder": os.path.exists(self.paths["vision_encoder"]),
+            "text_encoder": os.path.exists(self.paths["text_encoder"]),
+            "pcs_decoder": os.path.exists(self.paths["pcs_decoder"]),
+            "tracker_decoder": os.path.exists(self.paths["tracker_decoder"]),
+            "model_dir": self.paths["model_dir"],
             "device": self.device,
             "capabilities": [
-                "encode" if os.path.exists(VISION_ENCODER_PATH) else None,
+                "encode" if os.path.exists(self.paths["vision_encoder"]) else None,
                 "text_to_segment" if (
-                    os.path.exists(VISION_ENCODER_PATH) and
-                    os.path.exists(TEXT_ENCODER_PATH) and
-                    os.path.exists(PCS_DECODER_PATH)
+                    os.path.exists(self.paths["vision_encoder"]) and
+                    os.path.exists(self.paths["text_encoder"]) and
+                    os.path.exists(self.paths["pcs_decoder"])
                 ) else None,
                 "track" if (
-                    os.path.exists(VISION_ENCODER_PATH) and
-                    os.path.exists(TRACKER_DECODER_PATH)
+                    os.path.exists(self.paths["vision_encoder"]) and
+                    os.path.exists(self.paths["tracker_decoder"])
                 ) else None,
             ],
         }

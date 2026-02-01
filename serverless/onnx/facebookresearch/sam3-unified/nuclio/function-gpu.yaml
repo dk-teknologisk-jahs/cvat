@@ -95,9 +95,9 @@ spec:
             apt-get update && \
             apt-get -y install curl git python3 python3-pip ffmpeg libsm6 libxext6 && \
             rm -rf /var/lib/apt/lists/*
-      # Install Python dependencies
+      # Install Python dependencies (transformers for CLIP tokenizer in PCS mode)
         - kind: RUN
-          value: pip3 install --no-cache-dir numpy pillow opencv-python-headless onnxruntime-gpu redis
+          value: pip3 install --no-cache-dir numpy pillow opencv-python-headless onnxruntime-gpu redis transformers
       # Create models directory
         - kind: RUN
           value: mkdir -p /opt/nuclio/sam3/models

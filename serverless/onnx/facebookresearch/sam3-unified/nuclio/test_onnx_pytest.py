@@ -120,12 +120,13 @@ class TestTrackerDecoder:
 
     def test_inference_with_point(self, tracker_decoder_session):
         """Test inference with point prompt."""
+        # HuggingFace SAM3 expects 4D point_coords [B, num_objects, num_points, 2]
         test_inputs = {
             "fpn_feat_0": np.random.randn(1, 256, 288, 288).astype(np.float32),
             "fpn_feat_1": np.random.randn(1, 256, 144, 144).astype(np.float32),
             "fpn_feat_2": np.random.randn(1, 256, 72, 72).astype(np.float32),
-            "point_coords": np.array([[[504.0, 504.0]]], dtype=np.float32),
-            "point_labels": np.array([[1.0]], dtype=np.float32),
+            "point_coords": np.array([[[[504.0, 504.0]]]], dtype=np.float32),  # [B, num_objects, num_points, 2]
+            "point_labels": np.array([[[1.0]]], dtype=np.float32),  # [B, num_objects, num_points]
             "mask_input": np.zeros((1, 1, 288, 288), dtype=np.float32),
             "has_mask_input": np.array([0.0], dtype=np.float32),
         }
@@ -141,12 +142,13 @@ class TestTrackerDecoder:
 
     def test_output_finite(self, tracker_decoder_session):
         """Verify outputs contain finite values."""
+        # HuggingFace SAM3 expects 4D point_coords [B, num_objects, num_points, 2]
         test_inputs = {
             "fpn_feat_0": np.random.randn(1, 256, 288, 288).astype(np.float32),
             "fpn_feat_1": np.random.randn(1, 256, 144, 144).astype(np.float32),
             "fpn_feat_2": np.random.randn(1, 256, 72, 72).astype(np.float32),
-            "point_coords": np.array([[[504.0, 504.0]]], dtype=np.float32),
-            "point_labels": np.array([[1.0]], dtype=np.float32),
+            "point_coords": np.array([[[[504.0, 504.0]]]], dtype=np.float32),  # [B, num_objects, num_points, 2]
+            "point_labels": np.array([[[1.0]]], dtype=np.float32),  # [B, num_objects, num_points]
             "mask_input": np.zeros((1, 1, 288, 288), dtype=np.float32),
             "has_mask_input": np.array([0.0], dtype=np.float32),
         }
@@ -161,9 +163,9 @@ class TestTextEncoder:
     """Text encoder ONNX tests."""
 
     def test_inference(self, text_encoder_session):
-        """Test basic text encoding."""
+        \"\"\"Test basic text encoding.\"\"\"
         batch_size = 1
-        seq_len = 77
+        seq_len = 32  # SAM3 uses 32 token context length
         test_inputs = {
             "input_ids": np.ones((batch_size, seq_len), dtype=np.int64),
             "attention_mask": np.ones((batch_size, seq_len), dtype=np.int64),
@@ -175,10 +177,10 @@ class TestTextEncoder:
         assert outputs[0].shape[0] == batch_size, "batch dimension"
 
     def test_output_finite(self, text_encoder_session):
-        """Verify outputs contain finite values."""
+        \"\"\"Verify outputs contain finite values.\"\"\"
         test_inputs = {
-            "input_ids": np.ones((1, 77), dtype=np.int64),
-            "attention_mask": np.ones((1, 77), dtype=np.int64),
+            "input_ids": np.ones((1, 32), dtype=np.int64),  # SAM3 context length
+            "attention_mask": np.ones((1, 32), dtype=np.int64),
         }
 
         outputs = text_encoder_session.run(None, test_inputs)

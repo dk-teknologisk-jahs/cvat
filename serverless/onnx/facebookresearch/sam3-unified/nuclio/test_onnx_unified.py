@@ -44,6 +44,9 @@ MAX_MAE = 0.001  # Mean Absolute Error threshold
 MAX_DIFF = 0.01  # Maximum absolute difference threshold
 MIN_CORRELATION = 0.9999  # Minimum Pearson correlation
 
+# SAM3 constants
+SAM3_IMAGE_SIZE = 1008
+
 
 class Colors:
     """ANSI color codes for terminal output."""
@@ -182,7 +185,7 @@ def test_vision_encoder(
     print_info("Loading HuggingFace model (requires authentication)...")
     try:
         from transformers import Sam3TrackerModel
-        hf_model = Sam3TrackerModel.from_pretrained("facebook/sam3-hiera-large")
+        hf_model = Sam3TrackerModel.from_pretrained("facebook/sam3")
         hf_model = hf_model.to(device).eval()
         print_info("HuggingFace model loaded successfully")
     except Exception as e:
@@ -191,7 +194,9 @@ def test_vision_encoder(
         return False, []
 
     # Create PyTorch wrapper (import from export script)
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "pytorch/facebookresearch/sam3/nuclio"))
+    # Path: onnx/facebookresearch/sam3-unified/nuclio -> serverless/pytorch/facebookresearch/sam3/nuclio
+    export_path = Path(__file__).parent.parent.parent.parent.parent / "pytorch/facebookresearch/sam3/nuclio"
+    sys.path.insert(0, str(export_path))
     try:
         from export_hf_onnx import VisionEncoderWrapper
         pt_wrapper = VisionEncoderWrapper(hf_model, device=device).to(device).eval()
@@ -280,20 +285,20 @@ def test_tracker_decoder(
     print_info("Loading HuggingFace model...")
     try:
         from transformers import Sam3TrackerModel
-        hf_model = Sam3TrackerModel.from_pretrained("facebook/sam3-hiera-large")
+        hf_model = Sam3TrackerModel.from_pretrained("facebook/sam3")
         hf_model = hf_model.to(device).eval()
     except Exception as e:
         print_fail(f"Failed to load HuggingFace model: {e}")
         return False, []
 
     # Create PyTorch wrapper
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "pytorch/facebookresearch/sam3/nuclio"))
+    # Path: onnx/facebookresearch/sam3-unified/nuclio -> serverless/pytorch/facebookresearch/sam3/nuclio
+    export_path = Path(__file__).parent.parent.parent.parent.parent / "pytorch/facebookresearch/sam3/nuclio"
+    sys.path.insert(0, str(export_path))
     try:
         from export_hf_onnx import TrackerDecoderWrapper
         pt_wrapper = TrackerDecoderWrapper(
-            sam_prompt_encoder=hf_model.sam_prompt_encoder,
-            sam_mask_decoder=hf_model.sam_mask_decoder,
-            no_mem_embed=hf_model.no_mem_embed,
+            sam3_tracker_model=hf_model,
             multimask_output=True,
         ).to(device).eval()
     except ImportError:
@@ -311,9 +316,9 @@ def test_tracker_decoder(
         fpn_feat_1 = torch.randn(1, 256, 144, 144, device=device)
         fpn_feat_2 = torch.randn(1, 256, 72, 72, device=device)
 
-    # Point prompt in center
-    point_coords = torch.tensor([[[504.0, 504.0]]], device=device)
-    point_labels = torch.tensor([[1.0]], device=device)
+    # Point prompt in center - HuggingFace expects 4D [B, num_objects, num_points, 2]
+    point_coords = torch.tensor([[[[504.0, 504.0]]]], device=device)  # [B, num_objects, num_points, 2]
+    point_labels = torch.tensor([[[1.0]]], device=device)  # [B, num_objects, num_points]
     mask_input = torch.zeros(1, 1, 288, 288, device=device)
     has_mask_input = torch.tensor([0.0], device=device)
 
@@ -401,15 +406,17 @@ def test_text_encoder(
     print_info("Loading HuggingFace model...")
     try:
         from transformers import Sam3Model, Sam3Processor
-        hf_model = Sam3Model.from_pretrained("facebook/sam3-hiera-large")
+        hf_model = Sam3Model.from_pretrained("facebook/sam3")
         hf_model = hf_model.to(device).eval()
-        processor = Sam3Processor.from_pretrained("facebook/sam3-hiera-large")
+        processor = Sam3Processor.from_pretrained("facebook/sam3")
     except Exception as e:
         print_fail(f"Failed to load HuggingFace model: {e}")
         return False, []
 
     # Create PyTorch wrapper
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "pytorch/facebookresearch/sam3/nuclio"))
+    # Path: onnx/facebookresearch/sam3-unified/nuclio -> serverless/pytorch/facebookresearch/sam3/nuclio
+    export_path = Path(__file__).parent.parent.parent.parent.parent / "pytorch/facebookresearch/sam3/nuclio"
+    sys.path.insert(0, str(export_path))
     try:
         from export_hf_onnx import TextEncoderWrapper
         pt_wrapper = TextEncoderWrapper(hf_model).to(device).eval()
@@ -423,11 +430,11 @@ def test_text_encoder(
 
     print_info(f"Test prompts: {test_prompts}")
 
-    # Tokenize
+    # Tokenize - SAM3 uses 32 token context length (not CLIP's 77)
     text_inputs = processor.tokenizer(
         test_prompts,
         padding="max_length",
-        max_length=77,
+        max_length=32,  # SAM3's text encoder context length
         truncation=True,
         return_tensors="pt",
     )
@@ -544,14 +551,14 @@ def test_end_to_end_encode(
             return False, {}
         print_pass(f"Embedding {i} shape: {emb.shape}")
 
-    # Run decoder with point prompt
+    # Run decoder with point prompt - HuggingFace expects 4D [B, num_objects, num_points, 2]
     print_info("Running ONNX tracker decoder...")
     decoder_inputs = {
         "fpn_feat_0": embeddings[0],
         "fpn_feat_1": embeddings[1],
         "fpn_feat_2": embeddings[2],
-        "point_coords": np.array([[[504.0, 504.0]]], dtype=np.float32),
-        "point_labels": np.array([[1.0]], dtype=np.float32),
+        "point_coords": np.array([[[[504.0, 504.0]]]], dtype=np.float32),  # [B, num_objects, num_points, 2]
+        "point_labels": np.array([[[1.0]]], dtype=np.float32),  # [B, num_objects, num_points]
         "mask_input": np.zeros((1, 1, 288, 288), dtype=np.float32),
         "has_mask_input": np.array([0.0], dtype=np.float32),
     }
@@ -568,12 +575,14 @@ def test_end_to_end_encode(
     print_pass(f"Low-res masks shape: {low_res_masks.shape}")
     print_pass(f"Object score shape: {obj_score.shape}")
 
-    # Check mask validity
+    # Check mask validity - a valid prompt should produce non-zero masks
     mask_sum = masks.sum()
     if mask_sum > 0:
         print_pass(f"Mask has non-zero pixels (sum={mask_sum:.2f})")
     else:
-        print_warn("Mask is all zeros - may indicate an issue")
+        # For synthetic test image with random pixels, zero mask can happen
+        # Only fail if using a real test image where we expect valid segmentation
+        print_warn("Mask is all zeros - synthetic image may not have clear objects")
 
     print_info(f"Total encode+decode time: {(encode_time + decode_time)*1000:.2f}ms")
 
@@ -597,7 +606,6 @@ def test_end_to_end_text_to_segment(
     Note: PCS decoder is complex - this test verifies the pipeline works
     but detailed accuracy requires real images and ground truth.
     """
-    import torch
     import onnxruntime as ort
 
     print_subheader("End-to-End Text-to-Segment (Detector) Test")
@@ -615,14 +623,108 @@ def test_end_to_end_text_to_segment(
         missing.append("pcs_decoder.onnx")
 
     if missing:
-        print_warn(f"Missing ONNX models: {missing}")
-        print_info("Skipping PCS test - models not yet exported")
-        return True, {"skipped": True, "reason": "PCS models not found"}
+        print_fail(f"Missing ONNX models: {missing}")
+        return False, {"reason": f"PCS models not found: {missing}"}
 
-    print_info("PCS decoder test not yet implemented")
-    print_info("(Requires tokenizer integration)")
+    # Load ONNX models
+    providers = ["CPUExecutionProvider"]
+    print_info("Loading ONNX models...")
 
-    return True, {"skipped": True, "reason": "Not implemented"}
+    try:
+        vision_session = ort.InferenceSession(str(vision_path), providers=providers)
+        text_session = ort.InferenceSession(str(text_path), providers=providers)
+        pcs_session = ort.InferenceSession(str(pcs_path), providers=providers)
+        print_pass("Loaded all PCS pipeline models")
+    except Exception as e:
+        print_fail(f"Failed to load ONNX models: {e}")
+        return False, {"reason": str(e)}
+
+    # Create synthetic test image
+    print_info("Creating synthetic test image...")
+    img_array = np.random.randint(0, 255, (SAM3_IMAGE_SIZE, SAM3_IMAGE_SIZE, 3), dtype=np.uint8)
+    img_tensor = img_array.astype(np.float32) / 255.0
+    img_tensor = (img_tensor - 0.5) / 0.5
+    img_tensor = img_tensor.transpose(2, 0, 1)[np.newaxis, ...]  # [1, 3, 1008, 1008]
+
+    # Run vision encoder
+    print_info("Running vision encoder...")
+    start = time.time()
+    embeddings = vision_session.run(None, {"images": img_tensor})
+    encode_time = time.time() - start
+    print_info(f"Vision encoder time: {encode_time*1000:.2f}ms")
+
+    fpn_feat_0, fpn_feat_1, fpn_feat_2, fpn_pos_2 = embeddings
+    print_pass(f"Vision encoder outputs: {[e.shape for e in embeddings]}")
+
+    # Run text encoder with simple tokenization
+    print_info("Running text encoder...")
+    test_prompt = test_prompts[0] if test_prompts else "object"
+
+    # Simple tokenization: create input_ids and attention_mask for a single prompt
+    # Using zeros as placeholder tokens - the model will still run
+    seq_len = 32  # SAM3's text context length
+    input_ids = np.zeros((1, seq_len), dtype=np.int64)
+    attention_mask = np.zeros((1, seq_len), dtype=np.int64)
+    attention_mask[0, 0] = 1  # At least one valid token
+
+    start = time.time()
+    text_outputs = text_session.run(None, {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+    })
+    text_time = time.time() - start
+    print_info(f"Text encoder time: {text_time*1000:.2f}ms")
+
+    text_features, text_mask = text_outputs
+    print_pass(f"Text encoder outputs: features={text_features.shape}, mask={text_mask.shape}")
+
+    # Run PCS decoder
+    print_info("Running PCS decoder...")
+
+    # Use padding boxes (label=-10 means padding, ignored by the model)
+    # ONNX can't handle zero-dimension tensors, so we use 1 padded box
+    input_boxes = np.zeros((1, 1, 4), dtype=np.float32)
+    input_boxes_labels = np.full((1, 1), -10, dtype=np.int64)
+
+    start = time.time()
+    pcs_outputs = pcs_session.run(None, {
+        "fpn_feat_0": fpn_feat_0,
+        "fpn_feat_1": fpn_feat_1,
+        "fpn_feat_2": fpn_feat_2,
+        "fpn_pos_2": fpn_pos_2,
+        "text_features": text_features,
+        "text_mask": text_mask.astype(bool),
+        "input_boxes": input_boxes,
+        "input_boxes_labels": input_boxes_labels,
+    })
+    decode_time = time.time() - start
+    print_info(f"PCS decoder time: {decode_time*1000:.2f}ms")
+
+    pred_masks, pred_boxes, pred_logits, presence_logits = pcs_outputs
+    print_pass(f"PCS decoder outputs:")
+    print_info(f"  pred_masks: {pred_masks.shape}")
+    print_info(f"  pred_boxes: {pred_boxes.shape}")
+    print_info(f"  pred_logits: {pred_logits.shape}")
+    print_info(f"  presence_logits: {presence_logits.shape}")
+
+    # Verify output shapes are reasonable
+    if pred_masks.ndim != 4:
+        print_fail(f"Expected 4D pred_masks, got {pred_masks.ndim}D")
+        return False, {"reason": "Invalid pred_masks shape"}
+
+    if pred_boxes.shape[-1] != 4:
+        print_fail(f"Expected pred_boxes with 4 coords, got {pred_boxes.shape[-1]}")
+        return False, {"reason": "Invalid pred_boxes shape"}
+
+    print_info(f"Total pipeline time: {(encode_time + text_time + decode_time)*1000:.2f}ms")
+
+    return True, {
+        "encode_time_ms": encode_time * 1000,
+        "text_time_ms": text_time * 1000,
+        "decode_time_ms": decode_time * 1000,
+        "pred_masks_shape": list(pred_masks.shape),
+        "pred_boxes_shape": list(pred_boxes.shape),
+    }
 
 
 # =============================================================================
@@ -638,9 +740,13 @@ def test_unified_handler(
     """
     print_subheader("Unified Handler Module Test")
 
-    # Add handler to path
+    # Add handler to path and force reimport to pick up model_dir
     handler_path = Path(__file__).parent
     sys.path.insert(0, str(handler_path))
+
+    # Remove cached import if any to ensure fresh import with new model_dir
+    if "model_handler" in sys.modules:
+        del sys.modules["model_handler"]
 
     try:
         from model_handler import UnifiedModelHandler
@@ -649,17 +755,10 @@ def test_unified_handler(
         print_fail(f"Failed to import UnifiedModelHandler: {e}")
         return False, {}
 
-    # Set environment variables for model paths
-    os.environ["SAM3_MODEL_DIR"] = str(model_dir)
-    os.environ["SAM3_VISION_ENCODER"] = str(model_dir / "vision_encoder.onnx")
-    os.environ["SAM3_TEXT_ENCODER"] = str(model_dir / "text_encoder.onnx")
-    os.environ["SAM3_PCS_DECODER"] = str(model_dir / "pcs_decoder.onnx")
-    os.environ["SAM3_TRACKER_DECODER"] = str(model_dir / "tracker_decoder.onnx")
-
-    # Create handler
+    # Create handler with explicit model_dir parameter
     try:
-        handler = UnifiedModelHandler(device=device)
-        print_pass("Created UnifiedModelHandler instance")
+        handler = UnifiedModelHandler(device=device, model_dir=str(model_dir))
+        print_pass(f"Created UnifiedModelHandler instance (model_dir={model_dir})")
     except Exception as e:
         print_fail(f"Failed to create handler: {e}")
         return False, {}
@@ -681,8 +780,18 @@ def test_unified_handler(
         embeddings = handler.encode(test_image)
         print_pass(f"encode returned {len(embeddings)} embeddings")
 
+        # Verify embedding shapes
+        expected_shapes = {
+            "fpn_feat_0": (1, 256, 288, 288),
+            "fpn_feat_1": (1, 256, 144, 144),
+            "fpn_feat_2": (1, 256, 72, 72),
+            "fpn_pos_2": (1, 256, 72, 72),
+        }
         for name, arr in embeddings.items():
             print_info(f"  {name}: shape={arr.shape}, dtype={arr.dtype}")
+            if name in expected_shapes and arr.shape != expected_shapes[name]:
+                print_fail(f"  {name} shape mismatch: expected {expected_shapes[name]}")
+                return False, {}
     except Exception as e:
         print_fail(f"encode failed: {e}")
         import traceback
@@ -837,6 +946,8 @@ def main():
 
         passed, info = test_end_to_end_text_to_segment(model_dir, device, args.test_image)
         results["tests"]["end_to_end_text_to_segment"] = {"passed": passed, "info": info}
+        if not passed:
+            all_passed = False
 
     if run_all or args.test_handler:
         passed, info = test_unified_handler(model_dir, device)

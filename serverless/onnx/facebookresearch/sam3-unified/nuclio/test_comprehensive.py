@@ -508,14 +508,15 @@ class SAM3OnnxTester:
             raise RuntimeError("Decoder not loaded")
 
         # Prepare point coords and labels
+        # HuggingFace SAM3 expects 4D: [B, num_objects, num_points, 2]
         n_points = len(clicks)
-        point_coords = np.zeros((1, n_points, 2), dtype=np.float32)
-        point_labels = np.zeros((1, n_points), dtype=np.float32)
+        point_coords = np.zeros((1, 1, n_points, 2), dtype=np.float32)  # 4D!
+        point_labels = np.zeros((1, 1, n_points), dtype=np.float32)  # 3D!
 
         for i, click in enumerate(clicks):
-            point_coords[0, i, 0] = click.x
-            point_coords[0, i, 1] = click.y
-            point_labels[0, i] = click.label
+            point_coords[0, 0, i, 0] = click.x
+            point_coords[0, 0, i, 1] = click.y
+            point_labels[0, 0, i] = click.label
 
         # Prepare mask input
         if mask_input is None:

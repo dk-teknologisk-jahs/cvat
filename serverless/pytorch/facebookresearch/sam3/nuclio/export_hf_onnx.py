@@ -213,8 +213,8 @@ class TrackerDecoderWrapper(nn.Module):
         fpn_feat_0: [B, 256, 288, 288] - from vision encoder
         fpn_feat_1: [B, 256, 144, 144] - from vision encoder
         fpn_feat_2: [B, 256, 72, 72]   - from vision encoder
-        point_coords: [B, N, 2] - point coordinates in 1008x1008 space
-        point_labels: [B, N] - point labels (1=positive, 0=negative)
+        point_coords: [B, num_objects, num_points, 2] - point coordinates in 1008x1008 space (4D!)
+        point_labels: [B, num_objects, num_points] - point labels (1=positive, 0=negative)
         mask_input: [B, 1, 288, 288] - previous mask for refinement
         has_mask_input: [B] - whether mask_input is valid
 
@@ -586,7 +586,7 @@ def export_vision_encoder(
         model, device=device, image_height=image_height, image_width=image_width
     ).to(device).eval()
 
-    output_path = output_dir / "vision-encoder.onnx"
+    output_path = output_dir / "vision_encoder.onnx"
 
     dummy_input = torch.randn(1, 3, image_height, image_width, device=device)
 
@@ -633,7 +633,7 @@ def export_tracker_decoder(
         multimask_output=True,
     ).to(device).eval()
 
-    output_path = output_dir / "tracker-decoder.onnx"
+    output_path = output_dir / "tracker_decoder.onnx"
 
     # Dummy inputs - HuggingFace uses [B, num_objects, num_points, 2] for points
     batch_size = 1
@@ -697,7 +697,7 @@ def export_text_encoder(
 
     wrapper = TextEncoderWrapper(model).to(device).eval()
 
-    output_path = output_dir / "text-encoder.onnx"
+    output_path = output_dir / "text_encoder.onnx"
 
     seq_len = 32
     dummy_inputs = (
@@ -741,7 +741,7 @@ def export_pcs_decoder(
 
     wrapper = PCSDecoderWrapper(model).to(device).eval()
 
-    output_path = output_dir / "pcs-decoder.onnx"
+    output_path = output_dir / "pcs_decoder.onnx"
 
     # Dummy inputs
     dummy_inputs = (
@@ -975,11 +975,11 @@ def main():
 
     # Verify
     if args.verify:
-        if (output_dir / "vision-encoder.onnx").exists() and tracker_model:
-            verify_vision_encoder(output_dir / "vision-encoder.onnx", tracker_model, device)
+        if (output_dir / "vision_encoder.onnx").exists() and tracker_model:
+            verify_vision_encoder(output_dir / "vision_encoder.onnx", tracker_model, device)
 
-        if (output_dir / "tracker-decoder.onnx").exists() and tracker_model:
-            verify_tracker_decoder(output_dir / "tracker-decoder.onnx", tracker_model, device)
+        if (output_dir / "tracker_decoder.onnx").exists() and tracker_model:
+            verify_tracker_decoder(output_dir / "tracker_decoder.onnx", tracker_model, device)
 
     print(f"\n{'='*60}")
     print("Export Complete!")
