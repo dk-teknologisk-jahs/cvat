@@ -52,10 +52,44 @@ This means:
 
 | # | Task | Notes |
 |---|------|-------|
-| 1 | **Host ONNX models** | Upload 4 models (~3.3 GB) to HuggingFace Hub or cloud storage for Docker build |
-| 2 | **Create Dockerfile** | Add ONNX model download to `function-gpu.yaml` or create custom Dockerfile |
+| 1 | **Host ONNX models** | Create GitHub repo, upload as release files (like usls). Docker will export missing models on first run. |
+| 2 | **Create Dockerfile** | Add ONNX model download from GitHub releases, fallback to export if missing |
 | 3 | **End-to-end testing** | Test interactor (clicks→mask), detector (text→masks), tracker (propagate) |
 | 4 | **Update test preprocessing** | Match Sam3TrackerProcessor for consistent image preprocessing |
+
+#### ONNX Model Hosting Strategy
+
+**Approach**: Create a GitHub repository (e.g., `cvat-ai/sam3-onnx-models`) and upload exported ONNX models as **release files**. This mirrors the approach used by [usls](https://github.com/jamjamjon/usls).
+
+**Why GitHub Releases?**
+- Free hosting for large files (up to 2 GB per file)
+- No authentication required for downloads
+- Version control via release tags
+- Direct download URLs for Docker builds
+
+**Docker Build Strategy**:
+1. Try to download pre-exported models from GitHub releases
+2. If download fails or models missing, export them using `export_hf_onnx.py`
+3. This requires HuggingFace auth at build time (for gated `facebook/sam3` model)
+
+**⚠️ HuggingFace Token Required for Export**:
+The `facebook/sam3` model is **gated** - you must pass a HuggingFace token to export:
+```bash
+# Option 1: Environment variable
+docker build --build-arg HF_TOKEN=$HF_TOKEN ...
+
+# Option 2: Docker secret (more secure)
+docker build --secret id=hf_token,env=HF_TOKEN ...
+```
+
+**Example Dockerfile snippet**:
+```dockerfile
+# Try to download pre-exported models, fallback to export
+RUN mkdir -p /opt/nuclio/sam3/models && \
+    (curl -L https://github.com/cvat-ai/sam3-onnx-models/releases/download/v1.0/vision-encoder.onnx \
+         -o /opt/nuclio/sam3/models/vision-encoder.onnx || \
+     python export_hf_onnx.py --vision-encoder --output-dir /opt/nuclio/sam3/models)
+```
 
 #### Exported ONNX Models (Ready for Hosting)
 
