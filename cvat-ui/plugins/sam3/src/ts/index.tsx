@@ -304,6 +304,7 @@ const sam3Plugin: SAM3Plugin = {
                                 // Process server response if we have new embeddings
                                 if (result) {
                                     // Decode base64 embeddings from server
+                                    // Server returns: high_res_feats_0, high_res_feats_1, image_embed
                                     const decodeEmbedding = (base64: string, shape: number[]): Tensor => {
                                         const binaryStr = window.atob(base64);
                                         const bytes = new Uint8Array(binaryStr.length);
@@ -316,15 +317,15 @@ const sam3Plugin: SAM3Plugin = {
 
                                     plugin.data.emb0Cache.set(
                                         key,
-                                        decodeEmbedding(result.image_embeddings_0, result.image_embeddings_0_shape),
+                                        decodeEmbedding(result.high_res_feats_0, result.high_res_feats_0_shape),
                                     );
                                     plugin.data.emb1Cache.set(
                                         key,
-                                        decodeEmbedding(result.image_embeddings_1, result.image_embeddings_1_shape),
+                                        decodeEmbedding(result.high_res_feats_1, result.high_res_feats_1_shape),
                                     );
                                     plugin.data.emb2Cache.set(
                                         key,
-                                        decodeEmbedding(result.image_embeddings_2, result.image_embeddings_2_shape),
+                                        decodeEmbedding(result.image_embed, result.image_embed_shape),
                                     );
                                 } else {
                                     // Using cached embeddings
@@ -461,8 +462,8 @@ const sam3Plugin: SAM3Plugin = {
         worker: new Worker(new URL('./inference.worker', import.meta.url)),
         jobs: {},
         modelID: 'pth-facebookresearch-sam3-tracker',
-        // Use usls decoder (has trained weights) - mask refinement not yet supported
-        modelURL: '/assets/tracker-prompt-encoder-mask-decoder.onnx',
+        // Use decoder with mask refinement support (like SAM2)
+        modelURL: '/assets/tracker-prompt-encoder-mask-decoder-with-mask-input.onnx',
         emb0Cache: new LRUCache({
             // [1, 32, 288, 288] float32 = ~38 MB per frame, max 8 frames = ~300 MB
             max: 8,
@@ -482,8 +483,8 @@ const sam3Plugin: SAM3Plugin = {
             updateAgeOnHas: true,
         }),
         lastClicks: [],
-        // Mask refinement support
-        supportsMaskInput: false,  // Detected at init time based on decoder model
+        // Mask refinement support (auto-detected at init time)
+        supportsMaskInput: false,
         lowResMaskCache: new LRUCache({
             // [1, 1, 288, 288] float32 = ~330 KB per frame, max 8 frames
             max: 8,
