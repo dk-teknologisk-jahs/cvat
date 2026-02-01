@@ -562,7 +562,27 @@ function resizeMaskWithBbox(
     dstW: number,
     dstH: number,
 ): { mask: number[][]; bounds: [number, number, number, number] } {
-    // Step 1: Find bounding box on low-res mask (fast - only 288x288 = 82944 pixels)
+    // ========================================================================
+    // STEP 1: Fill holes on LOW-RES LOGITS (matching official SAM3)
+    // ========================================================================
+    // Official SAM3 fills holes BEFORE upsampling, operating on the 288x288 logits.
+    // From sam3/model/utils/sam1_utils.py:
+    //   is_hole = (labels > 0) & (areas <= self.max_hole_area)
+    //   masks = torch.where(is_hole, self.mask_threshold + 10.0, masks)
+    //
+    // The max_hole_area=256 refers to pixels at 288x288, NOT at full resolution.
+    // We use a mutable copy to modify logits before upsampling.
+    const logitsCopy = new Float32Array(maskLogits.length);
+    for (let i = 0; i < maskLogits.length; i++) {
+        logitsCopy[i] = maskLogits[i] as number;
+    }
+
+    // Fill holes in low-res mask (256 pixels at 288x288)
+    fillHolesOnLogits(logitsCopy, srcW, srcH, 256);
+
+    // ========================================================================
+    // STEP 2: Find bounding box on low-res mask (fast - only 288x288 pixels)
+    // ========================================================================
     let srcMinX = srcW;
     let srcMinY = srcH;
     let srcMaxX = -1;
@@ -571,7 +591,7 @@ function resizeMaskWithBbox(
     for (let y = 0; y < srcH; y++) {
         for (let x = 0; x < srcW; x++) {
             const idx = y * srcW + x;
-            if (maskLogits[idx] > 0) {
+            if (logitsCopy[idx] > 0) {
                 srcMinX = Math.min(srcMinX, x);
                 srcMinY = Math.min(srcMinY, y);
                 srcMaxX = Math.max(srcMaxX, x);
@@ -588,7 +608,9 @@ function resizeMaskWithBbox(
         };
     }
 
-    // Step 2: Convert low-res bbox to high-res coordinates
+    // ========================================================================
+    // STEP 3: Convert low-res bbox to high-res coordinates
+    // ========================================================================
     // Using align_corners=False inverse mapping: dst = (src + 0.5) / scale - 0.5
     const scaleX = srcW / dstW;
     const scaleY = srcH / dstH;
@@ -612,7 +634,11 @@ function resizeMaskWithBbox(
     const croppedW = dstMaxX - dstMinX + 1;
     const croppedH = dstMaxY - dstMinY + 1;
 
-    // Step 3: Only interpolate within the cropped region
+    // ========================================================================
+    // STEP 4: Upsample to high-res and threshold (matching official SAM3)
+    // ========================================================================
+    // Official SAM3: F.interpolate(masks, orig_hw, mode="bilinear", align_corners=False)
+    // Then threshold at 0 (logit > 0 = foreground)
     const result: number[][] = Array(croppedH).fill(0).map(() => Array(croppedW).fill(0));
 
     for (let y = 0; y < croppedH; y++) {
@@ -624,16 +650,13 @@ function resizeMaskWithBbox(
             const srcX = (dstX + 0.5) * scaleX - 0.5;
             const srcY = (dstY + 0.5) * scaleY - 0.5;
 
-            // Bilinear interpolation of LOGITS
-            const logit = bilinearSample(maskLogits, srcW, srcH, srcX, srcY);
+            // Bilinear interpolation of LOGITS (with holes already filled)
+            const logit = bilinearSample(logitsCopy, srcW, srcH, srcX, srcY);
 
             // Threshold at 0 (equivalent to sigmoid > 0.5)
             result[y][x] = logit > 0 ? 255 : 0;
         }
     }
-
-    // Step 4: Fill small interior holes in the mask (matching official SAM3)
-    fillHoles(result, croppedW, croppedH, 256);
 
     return {
         mask: result,
@@ -642,7 +665,7 @@ function resizeMaskWithBbox(
 }
 
 /**
- * Fill small interior holes in a binary mask using connected component analysis.
+ * Fill small interior holes in a LOGIT mask (before thresholding/upsampling).
  *
  * This matches the official SAM3 implementation from sam3/model/utils/sam1_utils.py:
  * ```python
@@ -651,17 +674,21 @@ function resizeMaskWithBbox(
  * masks = torch.where(is_hole, self.mask_threshold + 10.0, masks)
  * ```
  *
- * Algorithm:
- * 1. Find all connected components of background pixels (0)
- * 2. Mark components that touch the image border as "exterior" (not holes)
- * 3. For interior components (holes), only fill if area <= maxHoleArea
+ * CRITICAL: Official SAM3 fills holes at LOW-RES (288x288) BEFORE upsampling.
+ * The max_hole_area=256 refers to pixels at 288x288, not at full resolution.
+ * This ensures small holes at the source resolution are filled properly.
  *
- * @param mask - 2D binary mask array (0 = background, 255 = foreground)
+ * Algorithm:
+ * 1. Find all connected components of background pixels (logit <= 0)
+ * 2. Mark components that touch the image border as "exterior" (not holes)
+ * 3. For interior components (holes), if area <= maxHoleArea, set logit = +10.0
+ *
+ * @param logits - Float32Array of mask logits (modified in place)
  * @param width - mask width
  * @param height - mask height
  * @param maxHoleArea - maximum hole area to fill (default 256, matching SAM3)
  */
-function fillHoles(mask: number[][], width: number, height: number, maxHoleArea: number = 256): void {
+function fillHolesOnLogits(logits: Float32Array, width: number, height: number, maxHoleArea: number = 256): void {
     if (width <= 2 || height <= 2) return;  // Too small for holes
 
     // Connected component labeling using union-find
@@ -699,20 +726,20 @@ function fillHoles(mask: number[][], width: number, height: number, maxHoleArea:
         }
     };
 
-    // First pass: label background pixels and union with neighbors
+    // First pass: label background pixels (logit <= 0) and union with neighbors
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
-            if (mask[y][x] !== 0) continue;  // Skip foreground
-
             const idx = y * width + x;
+            if (logits[idx] > 0) continue;  // Skip foreground
+
             labels[idx] = idx;  // Mark as background (will be resolved to root later)
 
             // Union with left neighbor
-            if (x > 0 && mask[y][x - 1] === 0) {
+            if (x > 0 && logits[idx - 1] <= 0) {
                 union(idx, idx - 1);
             }
             // Union with top neighbor
-            if (y > 0 && mask[y - 1][x] === 0) {
+            if (y > 0 && logits[idx - width] <= 0) {
                 union(idx, idx - width);
             }
         }
@@ -740,7 +767,8 @@ function fillHoles(mask: number[][], width: number, height: number, maxHoleArea:
         }
     }
 
-    // Third pass: fill holes (interior components with area <= maxHoleArea)
+    // Third pass: fill holes by setting logit = +10.0 (matching official SAM3)
+    // Only fill interior holes (not touching border) with area <= maxHoleArea
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
             const idx = y * width + x;
@@ -750,9 +778,10 @@ function fillHoles(mask: number[][], width: number, height: number, maxHoleArea:
             const touchesBorder = componentTouchesBorder.get(root) || false;
             const area = componentArea.get(root) || 0;
 
-            // Fill only interior holes (not touching border) with area <= maxHoleArea
+            // Fill only interior holes with area <= maxHoleArea
             if (!touchesBorder && area <= maxHoleArea) {
-                mask[y][x] = 255;
+                // Official SAM3 sets logit to mask_threshold + 10.0 = 0 + 10 = 10
+                logits[idx] = 10.0;
             }
         }
     }

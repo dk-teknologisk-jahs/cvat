@@ -95,26 +95,61 @@ python serverless/pytorch/facebookresearch/sam3/nuclio/export_sam3_onnx.py \
 
 ## Key Findings from Official SAM3 Implementation
 
-### 1. Dynamic Mask Selection (`_dynamic_multimask_via_stability`)
+### 1. Mask Selection with `multimask_output=True` (ONNX Decoder)
 
-The official SAM3 decoder outputs **3 masks** in multimask mode:
-- **Mask 0**: "Single object" token - designed for non-ambiguous prompts (multiple points)
-- **Masks 1-2**: "Multi-object" tokens - designed for ambiguous prompts (single click)
+**IMPORTANT**: Our ONNX decoder uses `multimask_output=True`, which fundamentally changes how mask selection works.
 
-**Selection logic** (from `sam3/sam/mask_decoder.py`):
+#### What the Decoder Outputs
 
+When `multimask_output=True`, the SAM3 mask decoder internally does this:
 ```python
-# For SINGLE prompt (ambiguous): select best IoU from multi-mask outputs (masks 1-2)
-# For MULTIPLE prompts (non-ambiguous): use mask 0 if stable, else best multi-mask
-
-stability = area(logits > delta) / area(logits > -delta)  # delta=0.05
-if stability >= 0.98:  # Official threshold from model_builder.py
-    use_mask_0()
-else:
-    use_best_multimask()  # max IoU from masks 1-2
+# From sam3/sam/mask_decoder.py forward():
+if multimask_output:
+    masks = masks[:, 1:, :, :]  # Skip token 0, return tokens 1, 2, 3
+    iou_pred = iou_pred[:, 1:]
 ```
 
-**Browser implementation** must replicate this logic to avoid holes and disconnected regions.
+This means our ONNX decoder returns **3 masks** that correspond to **tokens 1, 2, 3** (the "multi-object" tokens). Token 0 (the "single-object" token) is **NOT included**.
+
+#### Correct Selection Logic
+
+From the official SAM3 documentation (`sam1_task_predictor.py`):
+
+> "For ambiguous input prompts (such as a single click), [multimask_output=True] will often produce better masks than a single prediction. **If only a single mask is needed, the model's predicted quality score can be used to select the best mask.**"
+
+Therefore, the browser should simply **select the mask with the highest IoU score**:
+
+```typescript
+let bestIdx = 0;
+let bestIou = iouData[0];
+for (let i = 1; i < numMasks; i++) {
+    if (iouData[i] > bestIou) {
+        bestIou = iouData[i];
+        bestIdx = i;
+    }
+}
+```
+
+This matches:
+- The official SAM3 recommendation for `multimask_output=True`
+- The usls Rust implementation (always picks best IoU)
+- The SAM2 behavior when using multimask mode
+
+#### What About `_dynamic_multimask_via_stability`?
+
+The stability-based selection (`_dynamic_multimask_via_stability`) is **only used when `multimask_output=False`**:
+
+```python
+# From sam3/sam/mask_decoder.py forward():
+if multimask_output:
+    masks = masks[:, 1:, :, :]  # Return multi-masks
+elif self.dynamic_multimask_via_stability and not self.training:
+    masks, iou_pred = self._dynamic_multimask_via_stability(masks, iou_pred)  # Only for single-mask mode
+else:
+    masks = masks[:, 0:1, :, :]
+```
+
+Since our ONNX decoder uses `multimask_output=True`, stability-based selection does not apply.
 
 ### 2. Point Coordinate Shift (+0.5 for Pixel Center)
 

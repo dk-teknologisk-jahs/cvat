@@ -311,81 +311,34 @@ if ((self as any).importScripts) {
                 const maskSize = maskH * maskW;
                 const iouData = iouScores.data as Float32Array;
 
-                // Count number of real prompts (non-padding points)
-                const labelsData = inputs.input_labels.data as Float32Array;
-                const numRealPoints = Array.from(labelsData).filter((l) => l >= 0).length;
-                const numBoxes = (inputs.input_boxes?.dims?.[1] as number) || 0;
-                const totalPrompts = numRealPoints + numBoxes;
-
-                // SAM3 dynamic mask selection (matching _dynamic_multimask_via_stability)
-                // When multimask=True, mask 0 is "single object" token, masks 1-2 are "multi-object" tokens
+                // SAM3 mask selection - consistent with official implementation
                 //
-                // Logic:
-                // 1. For SINGLE prompt (ambiguous): select best IoU from multi-mask outputs (masks 1-2)
-                // 2. For MULTIPLE prompts (non-ambiguous): use mask 0 if stable, else best multi-mask
+                // IMPORTANT: Our ONNX decoder uses multimask_output=True, which means:
+                // - The decoder returns 3 masks (tokens 1, 2, 3 from the original 4 mask tokens)
+                // - Token 0 (single-object token) is NOT included in the output
+                // - All 3 returned masks are "multi-mask" outputs for handling ambiguous cases
                 //
-                // Stability: stability = area(logits > delta) / area(logits > -delta)
-                const STABILITY_DELTA = 0.05;  // SAM3 default: dynamic_multimask_stability_delta
-                const STABILITY_THRESH = 0.98;  // SAM3 default: dynamic_multimask_stability_thresh
+                // From the official SAM3 documentation (sam1_task_predictor.py):
+                // "For ambiguous input prompts (such as a single click), [multimask_output=True]
+                //  will often produce better masks than a single prediction. If only a single
+                //  mask is needed, the model's predicted quality score can be used to select
+                //  the best mask."
+                //
+                // Therefore, we simply select the mask with the highest IoU score.
+                // This matches:
+                // - The official SAM3 recommendation for multimask_output=True
+                // - The usls Rust implementation (always picks best IoU)
+                // - The SAM2 behavior when using multimask mode
 
-                // Compute stability scores for all masks
-                const stabilityScores: number[] = [];
-                for (let i = 0; i < numMasks; i++) {
-                    const maskOffset = i * maskSize;
-                    let areaInner = 0;  // logits > delta (confident foreground)
-                    let areaUnion = 0;  // logits > -delta (not confident background)
+                let bestIdx = 0;
+                let bestIou = iouData[0] || 0;
 
-                    for (let j = 0; j < maskSize; j++) {
-                        const logit = maskData[maskOffset + j];
-                        if (logit > STABILITY_DELTA) areaInner++;
-                        if (logit > -STABILITY_DELTA) areaUnion++;
-                    }
-
-                    stabilityScores.push(areaUnion > 0 ? areaInner / areaUnion : 1.0);
-                }
-
-                let bestIdx: number;
-                let selectionReason: string;
-
-
-
-                if (totalPrompts === 1) {
-                    // SINGLE prompt (ambiguous) - select best IoU from multi-mask outputs (masks 1+)
-                    // Mask 0 is the "single object" token, not ideal for ambiguous cases
-                    bestIdx = 1;  // Start with mask 1
-                    let bestMultiIou = iouData[1] || 0;
-
-                    for (let i = 2; i < numMasks; i++) {
-                        if (iouData[i] > bestMultiIou) {
-                            bestMultiIou = iouData[i];
-                            bestIdx = i;
-                        }
-                    }
-                    selectionReason = `single prompt → best multi-mask (IoU=${bestMultiIou.toFixed(3)})`;
-                } else {
-                    // MULTIPLE prompts (non-ambiguous) - prefer mask 0 if stable
-                    const mask0Stability = stabilityScores[0];
-                    const isStable = mask0Stability >= STABILITY_THRESH;
-
-                    if (isStable) {
-                        bestIdx = 0;
-                        selectionReason = `multiple prompts, mask 0 stable (${mask0Stability.toFixed(3)} >= ${STABILITY_THRESH})`;
-                    } else {
-                        // Fall back to best multi-mask
-                        bestIdx = 1;
-                        let bestMultiIou = iouData[1] || 0;
-
-                        for (let i = 2; i < numMasks; i++) {
-                            if (iouData[i] > bestMultiIou) {
-                                bestMultiIou = iouData[i];
-                                bestIdx = i;
-                            }
-                        }
-                        selectionReason = `multiple prompts, mask 0 unstable (${mask0Stability.toFixed(3)} < ${STABILITY_THRESH}) → best multi-mask`;
+                for (let i = 1; i < numMasks; i++) {
+                    if (iouData[i] > bestIou) {
+                        bestIou = iouData[i];
+                        bestIdx = i;
                     }
                 }
-
-
 
                 // Extract the best mask as LOGITS (not probabilities!)
                 const maskOffset = bestIdx * maskSize;
