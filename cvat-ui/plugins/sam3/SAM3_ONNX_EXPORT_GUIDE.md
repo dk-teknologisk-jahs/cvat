@@ -2,7 +2,7 @@
 
 This document describes SAM3 architecture, ONNX export strategies, and how SAM3 covers **all three CVAT AI tool categories**: Interactor, Detector, and Tracker.
 
-> **Last Updated**: 1 February 2026
+> **Last Updated**: 2 February 2026
 
 ---
 
@@ -36,12 +36,14 @@ We are migrating from a hybrid approach (external vision encoder + custom decode
 | **PCS Decoder** | ✅ Exported | 123 MB, DETR encoder/decoder + heads |
 | **Export Script** | ✅ Created | `serverless/pytorch/facebookresearch/sam3/nuclio/export_hf_onnx.py` |
 | **Verification Tests** | ✅ Passed | MAE < 0.001 for all components |
+| **Unified Nuclio Function** | ✅ Implemented | `sam3-unified/nuclio/` with video tracking |
+| **Redis State Management** | ✅ Implemented | Video tracking session state in Redis |
+| **HuggingFace Integration** | ✅ Implemented | Sam3Model, Sam3TrackerModel, Sam3VideoModel |
 
 #### 🔄 In Progress
 
 | Task | Status | Notes |
 |------|--------|-------|
-| Unified nuclio function | 🔄 Planning | Single function for interactor + detector + tracker |
 | Browser integration | 🔄 Pending | Update to use 256ch vision encoder outputs |
 | End-to-end testing | 🔄 Pending | Test full pipeline with real images |
 | Model deployment | 🔄 Pending | Copy ONNX files to appropriate locations |
@@ -124,16 +126,17 @@ Create a **single nuclio function** that handles all three CVAT AI tool types, s
 
 ### Implementation Steps
 
-1. **Update `sam3-unified` function** to add video tracking mode
-   - Add Redis dependency for session state
-   - Lazy load `Sam3VideoModel` only when tracking is used
-   - Implement CVAT tracker interface (`shapes` + `states` format)
+1. ✅ **Update `sam3-unified` function** to add video tracking mode
+   - ✅ Added Redis dependency for session state (`RedisCache` class)
+   - ✅ Lazy load `Sam3VideoModel` only when tracking is used
+   - ✅ Implemented CVAT tracker interface (`shapes` + `states` format)
+   - ✅ Added `track/init`, `track/frame`, `track/clear` modes in `main.py`
 
-2. **Browser Integration** for interactor mode
+2. 🔄 **Browser Integration** for interactor mode
    - Update `inference.worker.ts` to accept 256ch vision encoder outputs
    - Deploy tracker decoder ONNX to plugin assets
 
-3. **End-to-End Testing**
+3. 🔄 **End-to-End Testing**
    - Test interactor mode (clicks → mask)
    - Test detector mode (text prompts → all instances)
    - Test tracker mode (propagate masks across frames)
@@ -225,6 +228,56 @@ python export_v2.py --all --model-path facebook/sam3 --output-dir /tmp/sam3-onnx
 Official Facebook SAM3 PyTorch implementation.
 
 **⚠️ Important**: Cannot export vision encoder to ONNX due to `torch.view_as_complex()` in RoPE. Use HuggingFace Transformers implementation instead.
+
+### Implemented: sam3-unified Nuclio Function
+
+**Location**: `serverless/pytorch/facebookresearch/sam3-unified/nuclio/`
+
+This is the **unified SAM3 function** that combines all three CVAT AI tool types into a single nuclio deployment.
+
+**Files**:
+- `model_handler_unified.py` - HuggingFace model handler with Redis state management
+- `main.py` - Request routing by `mode` parameter
+- `function-gpu.yaml` - Nuclio configuration with Redis environment variables
+
+**Supported Modes**:
+```python
+# Request modes:
+mode="encode"           # Interactor: Image → embeddings for browser decoding
+mode="text-to-segment"  # Detector: Image + text → masks + boxes
+mode="track/init"       # Tracker: Initialize tracking session
+mode="track/frame"      # Tracker: Propagate to next frame
+mode="track/clear"      # Tracker: Clear session
+mode="info"             # Get model information
+```
+
+**HuggingFace Models (Lazy Loaded)**:
+```python
+from transformers import Sam3Model, Sam3Processor           # PCS (Detector)
+from transformers import Sam3TrackerModel, Sam3TrackerProcessor  # PVS (Interactor)
+from transformers import Sam3VideoModel, Sam3VideoProcessor      # Video Tracker
+```
+
+**Video Tracking State Management**:
+```python
+# Redis-based session state (memory bank too large for request body)
+class RedisCache:
+    def set(self, prefix, key, data, ttl=3600): ...
+    def get(self, prefix, key): ...
+    def delete(self, prefix, key): ...
+
+# Session ID returned in tracker response
+states = [{"session_id": "sam3_track_abc123", "object_id": 1}]
+```
+
+**Environment Variables**:
+```yaml
+- HF_TOKEN        # HuggingFace token for gated models (optional)
+- REDIS_HOST      # Redis server host (default: cvat_redis)
+- REDIS_PORT      # Redis server port (default: 6379)
+- REDIS_PASSWORD  # Redis password (optional)
+- REDIS_TTL       # Session TTL in seconds (default: 3600)
+```
 
 ---
 
