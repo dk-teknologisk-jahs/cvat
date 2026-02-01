@@ -57,6 +57,210 @@ SAM3 is a unified model for segmentation with multiple prompt types. All encoder
 
 ---
 
+## How SAM3 Components Fit Together
+
+### Component Inventory
+
+SAM3 consists of **8 independent components** with no shared parameters:
+
+| Component | Parameters | Input | Output | Purpose |
+|-----------|------------|-------|--------|---------|
+| **Vision Encoder** | 454M | Image `[B,3,1008,1008]` | FPN features (3 levels) | Extract visual features |
+| **Text Encoder** | 354M | Token IDs `[B,32]` | Text embeddings `[32,B,256]` | Encode text prompts |
+| **Geometry Encoder** | 8M | Boxes/Points + FPN | Geometry embeddings | Encode spatial prompts |
+| **DETR Encoder** | 10M | FPN + Prompts | Memory features | Fuse image & prompts |
+| **DETR Decoder** | 12M | Memory + Queries | Object features | Generate object proposals |
+| **Mask Decoder** | 2M | Object features + FPN | Masks `[B,N,H,W]` | Produce segmentation masks |
+| **Scoring Head** | 1M | Object features + Text | Logits `[B,N,1]` | Match objects to prompts |
+| **Box Head** | ~0.5M | Object features | Boxes `[B,N,4]` | Predict bounding boxes |
+
+### Data Flow: Text-to-Segment Mode (PCS)
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         TEXT-TO-SEGMENT PIPELINE                             │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   IMAGE                              TEXT PROMPT                             │
+│  [B,3,1008,1008]                    "a person"                               │
+│       │                                  │                                   │
+│       ▼                                  ▼                                   │
+│  ┌─────────────┐                   ┌───────────┐                             │
+│  │   VISION    │                   │   TEXT    │                             │
+│  │   ENCODER   │                   │  ENCODER  │                             │
+│  │  (ViT+FPN)  │                   │  (CLIP)   │                             │
+│  └──────┬──────┘                   └─────┬─────┘                             │
+│         │                                │                                   │
+│         │  FPN Features:                 │  Text Features:                   │
+│         │  - Level 0: [B,256,288,288]    │  - [32, B, 256]                   │
+│         │  - Level 1: [B,256,144,144]    │  - text_mask: [B, 32]             │
+│         │  - Level 2: [B,256,72,72]      │                                   │
+│         │                                │                                   │
+│         │         ┌──────────────────────┤                                   │
+│         │         │  Optional:           │                                   │
+│         │         │  ┌─────────────┐     │                                   │
+│         │         │  │  GEOMETRY   │     │  Box prompts: [B,N,4]             │
+│         │         │  │   ENCODER   │◄────┤  (for guided segmentation)        │
+│         │         │  └──────┬──────┘     │                                   │
+│         │         │         │            │                                   │
+│         │         └─────────┼────────────┘                                   │
+│         │                   │                                                │
+│         │                   ▼                                                │
+│         │         ┌─────────────────┐                                        │
+│         │         │ CONCAT PROMPTS  │  [text_feats + geo_feats]              │
+│         │         └────────┬────────┘                                        │
+│         │                  │                                                 │
+│         ▼                  ▼                                                 │
+│  ┌──────────────────────────────────┐                                        │
+│  │         DETR ENCODER             │  Cross-attention:                      │
+│  │   (TransformerEncoderFusion)     │  - Image attends to prompts            │
+│  │                                  │  - Only uses Level 2 (72x72)           │
+│  └───────────────┬──────────────────┘                                        │
+│                  │                                                           │
+│                  │  Memory: [5184, B, 256]  (72*72 = 5184)                   │
+│                  ▼                                                           │
+│  ┌──────────────────────────────────┐                                        │
+│  │         DETR DECODER             │  200 learnable object queries          │
+│  │     (TransformerDecoder)         │  Cross-attend to memory + prompts      │
+│  └───────────────┬──────────────────┘                                        │
+│                  │                                                           │
+│                  │  Object Features: [B, 200, 256]                           │
+│                  │                                                           │
+│    ┌─────────────┼─────────────┬─────────────┐                               │
+│    │             │             │             │                               │
+│    ▼             ▼             ▼             ▼                               │
+│ ┌──────┐    ┌────────┐   ┌─────────┐   ┌──────────┐                          │
+│ │SCORES│    │  BOX   │   │  MASK   │   │PRESENCE  │                          │
+│ │(dot) │    │  HEAD  │   │ DECODER │   │  SCORE   │                          │
+│ └──┬───┘    └───┬────┘   └────┬────┘   └────┬─────┘                          │
+│    │            │             │             │                                │
+│    ▼            ▼             ▼             ▼                                │
+│ pred_logits  pred_boxes   pred_masks   obj_presence                          │
+│ [B,200,1]    [B,200,4]    [B,200,H,W]   [B,200,1]                            │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Data Flow: Interactor Mode (Point/Box Clicks)
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         INTERACTOR PIPELINE                                  │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   IMAGE                              CLICKS/BOX                              │
+│  [B,3,1008,1008]                    point_coords, point_labels               │
+│       │                                  │                                   │
+│       ▼                                  │                                   │
+│  ┌─────────────┐ SERVER                  │                                   │
+│  │   VISION    │ (PyTorch)               │                                   │
+│  │   ENCODER   │                         │                                   │
+│  └──────┬──────┘                         │                                   │
+│         │                                │                                   │
+│         │  Cached Embeddings:            │                                   │
+│         │  - image_embed: [B,256,72,72]  │                                   │
+│         │  - high_res_0: [B,32,288,288]  │                                   │
+│         │  - high_res_1: [B,64,144,144]  │                                   │
+│         │                                │                                   │
+│  ───────┼────────────────────────────────┼───────────────────────────────    │
+│         │         BROWSER                │                                   │
+│         │         (ONNX)                 │                                   │
+│         ▼                                ▼                                   │
+│  ┌──────────────────────────────────────────────┐                            │
+│  │            PROMPT ENCODER + MASK DECODER     │                            │
+│  │                 (16.3 MB ONNX)               │                            │
+│  │                                              │                            │
+│  │   1. Encode points/boxes → sparse_embed      │                            │
+│  │   2. Encode prev mask → dense_embed          │                            │
+│  │   3. Cross-attend to image features          │                            │
+│  │   4. Upsample through high-res features      │                            │
+│  │   5. Output 3 mask candidates + IoU scores   │                            │
+│  └───────────────────┬──────────────────────────┘                            │
+│                      │                                                       │
+│                      ▼                                                       │
+│               ┌────────────┐                                                 │
+│               │ SELECT BEST│  Pick mask with highest IoU score               │
+│               │    MASK    │  (or use stability-based selection)             │
+│               └─────┬──────┘                                                 │
+│                     │                                                        │
+│                     ▼                                                        │
+│              pred_mask [1008,1008]                                           │
+│              low_res_mask [288,288] → cache for refinement                   │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Architectural Insights
+
+#### 1. FPN Feature Usage
+
+The backbone produces 3 FPN levels, but they're used differently:
+
+| FPN Level | Resolution | Used By |
+|-----------|------------|---------|
+| Level 0 | 288×288 | Mask decoder (high-res details) |
+| Level 1 | 144×144 | Mask decoder (mid-res features) |
+| Level 2 | 72×72 | **DETR encoder** (main processing) |
+
+**Key insight**: The DETR encoder (`num_feature_levels=1`) only processes the **smallest FPN level** (72×72). All fusion and attention happens at this resolution. The higher-resolution features are only used in the mask decoder for upsampling.
+
+#### 2. Prompt Encoding
+
+Prompts are encoded and concatenated before the DETR encoder:
+
+```python
+# Text prompts: [seq_len, B, 256]
+text_features = text_encoder(input_ids)
+
+# Geometry prompts (optional): [num_geo, B, 256]
+geo_features = geometry_encoder(boxes, points, fpn_features)
+
+# Combined: [seq_len + num_geo + 1, B, 256]
+#           └─ text ─┘  └─ geo ─┘  └─ CLS token
+prompt = concat([text_features, geo_features, cls_token])
+```
+
+#### 3. DETR Decoder Object Queries
+
+The DETR decoder uses **200 learnable object queries** that cross-attend to:
+1. **Memory** (fused image-prompt features from encoder)
+2. **Prompts** (text + geometry features directly)
+
+Each query proposes one potential object, producing:
+- Object feature vector (256-dim)
+- Predicted box (4 coords)
+- Predicted mask (via mask decoder)
+- Class logits (via dot product with text embeddings)
+- Presence score (is this query valid?)
+
+#### 4. Scoring via Dot Product
+
+SAM3 uses **dot product scoring** instead of a classification head:
+
+```python
+# Object features: [B, 200, 256]
+# Text features: [32, B, 256]
+# Score = object_feat · text_feat
+scores = torch.einsum("bqc,lbc->bql", object_features, text_features)
+# Result: [B, 200, 32] → which text prompt matches which object
+```
+
+This enables **open-vocabulary detection** - no fixed class labels.
+
+### File Locations
+
+| Component | Official SAM3 | HuggingFace |
+|-----------|---------------|-------------|
+| Vision Encoder | `sam3/model/image_encoder/` | `transformers/models/sam3/` |
+| Text Encoder | `sam3/model/language_backbone/` | `transformers/models/sam3/` |
+| Geometry Encoder | `sam3/model/geometry_encoders.py` | (not separate) |
+| DETR Encoder | `sam3/model/encoder.py` | (not separate) |
+| DETR Decoder | `sam3/model/decoder.py` | (not separate) |
+| Mask Decoder | `sam3/sam/mask_decoder.py` | `transformers/models/sam3/` |
+| Full Pipeline | `sam3/model/sam3_image_predictor.py` | `Sam3Model` |
+
+---
+
 ## Two Model Implementations
 
 SAM3 has two PyTorch implementations with **different ONNX export capabilities**:
