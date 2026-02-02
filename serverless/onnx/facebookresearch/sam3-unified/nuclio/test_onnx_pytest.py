@@ -163,7 +163,7 @@ class TestTextEncoder:
     """Text encoder ONNX tests."""
 
     def test_inference(self, text_encoder_session):
-        \"\"\"Test basic text encoding.\"\"\"
+        """Test basic text encoding."""
         batch_size = 1
         seq_len = 32  # SAM3 uses 32 token context length
         test_inputs = {
@@ -177,7 +177,7 @@ class TestTextEncoder:
         assert outputs[0].shape[0] == batch_size, "batch dimension"
 
     def test_output_finite(self, text_encoder_session):
-        \"\"\"Verify outputs contain finite values.\"\"\"
+        """Verify outputs contain finite values."""
         test_inputs = {
             "input_ids": np.ones((1, 32), dtype=np.int64),  # SAM3 context length
             "attention_mask": np.ones((1, 32), dtype=np.int64),

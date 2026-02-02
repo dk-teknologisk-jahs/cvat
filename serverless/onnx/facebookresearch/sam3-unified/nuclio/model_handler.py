@@ -326,6 +326,46 @@ class UnifiedModelHandler:
         logger.info(f"Encoded image: {image.size} -> {list(result.keys())}")
         return result
 
+    def encode_batch(self, images: List[Image.Image]) -> Dict[str, np.ndarray]:
+        """
+        Encode multiple images in a single forward pass.
+
+        More efficient than calling encode() multiple times for video or multi-image scenarios.
+
+        Args:
+            images: List of PIL Images (all will be resized to 1008x1008)
+
+        Returns:
+            Dictionary with batched embeddings:
+            - fpn_feat_0: [B, 256, 288, 288]
+            - fpn_feat_1: [B, 256, 144, 144]
+            - fpn_feat_2: [B, 256, 72, 72]
+            - fpn_pos_2: [B, 256, 72, 72]
+        """
+        if not images:
+            return {}
+
+        encoder = self._get_vision_encoder()
+
+        # Preprocess all images
+        input_tensors = [self.preprocess_image(img) for img in images]
+        batch_tensor = np.concatenate(input_tensors, axis=0)  # [B, 3, 1008, 1008]
+
+        # Get input/output names
+        input_name = encoder.get_inputs()[0].name
+        output_names = [o.name for o in encoder.get_outputs()]
+
+        # Run encoder on batch
+        outputs = encoder.run(output_names, {input_name: batch_tensor})
+
+        # Map outputs to standard names
+        result = {}
+        for name, arr in zip(output_names, outputs):
+            result[name] = arr
+
+        logger.info(f"Encoded batch of {len(images)} images -> {list(result.keys())}")
+        return result
+
     # =========================================================================
     # Text-to-Segment (Detector/PCS Mode)
     # =========================================================================
@@ -335,6 +375,7 @@ class UnifiedModelHandler:
         text_prompts: List[str],
         image: Image.Image,
         confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
+        box_prompts: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Run text-to-segment (PCS mode) using ONNX models.
@@ -343,6 +384,11 @@ class UnifiedModelHandler:
             text_prompts: List of text prompts (e.g., ["a person", "a car"])
             image: PIL Image
             confidence_threshold: Minimum confidence for detections
+            box_prompts: Optional list of box prompts for geometric guidance.
+                         Each box is a dict with:
+                         - "box": [x1, y1, x2, y2] in image coordinates
+                         - "label": 1 for positive (include), 0 for negative (exclude)
+                         Example: [{"box": [100, 100, 200, 200], "label": 1}]
 
         Returns:
             List of detections: [{"mask": np.ndarray, "box": [x1,y1,x2,y2], "score": float, "label": str}, ...]
@@ -353,8 +399,9 @@ class UnifiedModelHandler:
         pcs_decoder = self._get_pcs_decoder()
 
         original_size = image.size  # (W, H)
+        orig_w, orig_h = original_size
 
-        # 1. Encode image
+        # 1. Encode image (once for all prompts)
         input_tensor = self.preprocess_image(image)
         vision_input = vision_encoder.get_inputs()[0].name
         vision_outputs = [o.name for o in vision_encoder.get_outputs()]
@@ -367,45 +414,72 @@ class UnifiedModelHandler:
         fpn_feat_2 = vision_dict.get("fpn_feat_2", vision_features[2])
         fpn_pos_2 = vision_dict.get("fpn_pos_2", vision_features[3])
 
-        # 2. Encode text prompts
-        text_features, text_mask = self._encode_text(text_encoder, text_prompts)
+        # Prepare box prompts (convert from xyxy image coords to cxcywh normalized)
+        if box_prompts and len(box_prompts) > 0:
+            num_boxes = len(box_prompts)
+            input_boxes = np.zeros((1, num_boxes, 4), dtype=np.float32)
+            input_boxes_labels = np.zeros((1, num_boxes), dtype=np.int64)
 
-        # Ensure text_mask is bool type for ONNX
-        text_mask = text_mask.astype(bool)
+            for i, bp in enumerate(box_prompts):
+                box = bp.get("box", [0, 0, 1, 1])
+                label = bp.get("label", 1)  # Default to positive
 
-        # 3. Run PCS decoder with all required inputs
-        # PCS decoder expects: fpn_feat_0, fpn_feat_1, fpn_feat_2, fpn_pos_2,
-        #                      text_features, text_mask, input_boxes, input_boxes_labels
+                # Convert xyxy to cxcywh normalized
+                x1, y1, x2, y2 = box
+                cx = (x1 + x2) / 2.0 / orig_w
+                cy = (y1 + y2) / 2.0 / orig_h
+                w = (x2 - x1) / orig_w
+                h = (y2 - y1) / orig_h
 
-        # Use padding boxes (label=-10 means ignored/padding)
-        batch_size = text_features.shape[0]
-        input_boxes = np.zeros((batch_size, 1, 4), dtype=np.float32)
-        input_boxes_labels = np.full((batch_size, 1), -10, dtype=np.int64)
+                input_boxes[0, i] = [cx, cy, w, h]
+                input_boxes_labels[0, i] = int(label)
 
-        pcs_inputs = {
-            "fpn_feat_0": fpn_feat_0,
-            "fpn_feat_1": fpn_feat_1,
-            "fpn_feat_2": fpn_feat_2,
-            "fpn_pos_2": fpn_pos_2,
-            "text_features": text_features,
-            "text_mask": text_mask,
-            "input_boxes": input_boxes,
-            "input_boxes_labels": input_boxes_labels,
-        }
-        pcs_output_names = [o.name for o in pcs_decoder.get_outputs()]
-        pcs_outputs = pcs_decoder.run(pcs_output_names, pcs_inputs)
+            logger.info(f"Using {num_boxes} box prompts for PCS")
+        else:
+            # No box prompts - use padding (label=-10)
+            input_boxes = np.zeros((1, 1, 4), dtype=np.float32)
+            input_boxes_labels = np.full((1, 1), -10, dtype=np.int64)
 
-        # Parse outputs (boxes, scores, masks)
-        detections = self._parse_pcs_outputs(
-            pcs_outputs,
-            pcs_output_names,
-            original_size,
-            text_prompts,
-            confidence_threshold,
-        )
+        # Process prompts one at a time since PCS decoder is exported with batch_size=1
+        all_detections = []
+        for prompt_idx, prompt in enumerate(text_prompts):
+            # 2. Encode single text prompt
+            text_features, text_mask = self._encode_text(text_encoder, [prompt])
 
-        logger.info(f"Text-to-segment found {len(detections)} objects for '{text_prompts}'")
-        return detections
+            # Ensure text_mask is bool type for ONNX
+            text_mask = text_mask.astype(bool)
+
+            # 3. Run PCS decoder with all required inputs
+            pcs_inputs = {
+                "fpn_feat_0": fpn_feat_0,
+                "fpn_feat_1": fpn_feat_1,
+                "fpn_feat_2": fpn_feat_2,
+                "fpn_pos_2": fpn_pos_2,
+                "text_features": text_features,
+                "text_mask": text_mask,
+                "input_boxes": input_boxes,
+                "input_boxes_labels": input_boxes_labels,
+            }
+            pcs_output_names = [o.name for o in pcs_decoder.get_outputs()]
+            pcs_outputs = pcs_decoder.run(pcs_output_names, pcs_inputs)
+
+            # Parse outputs (boxes, scores, masks)
+            detections = self._parse_pcs_outputs(
+                pcs_outputs,
+                pcs_output_names,
+                original_size,
+                [prompt],
+                confidence_threshold,
+            )
+
+            # Tag detections with prompt label
+            for det in detections:
+                det["label"] = prompt
+
+            all_detections.extend(detections)
+
+        logger.info(f"Text-to-segment found {len(all_detections)} objects for '{text_prompts}'")
+        return all_detections
 
     def _get_tokenizer(self):
         """Get or create a CLIP tokenizer for text encoding."""
@@ -565,9 +639,445 @@ class UnifiedModelHandler:
 
         return detections
 
+    def get_semantic_mask(
+        self,
+        detections: List[Dict[str, Any]],
+        image_size: Optional[Tuple[int, int]] = None,
+    ) -> np.ndarray:
+        """
+        Convert instance detections to a semantic segmentation mask.
+
+        Takes the union of all instance masks to produce a single binary mask
+        showing all detected objects.
+
+        Args:
+            detections: List of detection dicts from text_to_segment() or
+                       automatic_mask_generation(), each containing a "mask" key
+            image_size: (width, height) tuple. If not provided, inferred from masks.
+
+        Returns:
+            Binary semantic mask [H, W] as uint8 (0 or 1)
+        """
+        if not detections:
+            if image_size:
+                return np.zeros((image_size[1], image_size[0]), dtype=np.uint8)
+            return np.zeros((1, 1), dtype=np.uint8)
+
+        # Get image size from first valid mask if not provided
+        if image_size is None:
+            for det in detections:
+                mask = det.get("mask")
+                if mask is not None:
+                    h, w = mask.shape[:2]
+                    image_size = (w, h)
+                    break
+
+        if image_size is None:
+            return np.zeros((1, 1), dtype=np.uint8)
+
+        # Union all masks
+        semantic_mask = np.zeros((image_size[1], image_size[0]), dtype=np.uint8)
+        for det in detections:
+            mask = det.get("mask")
+            if mask is not None:
+                # Ensure mask matches expected size
+                if mask.shape[:2] != (image_size[1], image_size[0]):
+                    mask = cv2.resize(
+                        mask.astype(np.float32),
+                        image_size,
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                semantic_mask = np.logical_or(semantic_mask, mask > 0).astype(np.uint8)
+
+        return semantic_mask
+
+    def get_labeled_semantic_mask(
+        self,
+        detections: List[Dict[str, Any]],
+        image_size: Optional[Tuple[int, int]] = None,
+    ) -> np.ndarray:
+        """
+        Convert instance detections to a labeled semantic segmentation mask.
+
+        Each instance gets a unique label ID. Overlapping regions get the
+        label of the detection with highest score.
+
+        Args:
+            detections: List of detection dicts from text_to_segment() or
+                       automatic_mask_generation()
+            image_size: (width, height) tuple. If not provided, inferred from masks.
+
+        Returns:
+            Labeled mask [H, W] as int32 (0=background, 1,2,3...=instances)
+        """
+        if not detections:
+            if image_size:
+                return np.zeros((image_size[1], image_size[0]), dtype=np.int32)
+            return np.zeros((1, 1), dtype=np.int32)
+
+        # Get image size from first valid mask if not provided
+        if image_size is None:
+            for det in detections:
+                mask = det.get("mask")
+                if mask is not None:
+                    h, w = mask.shape[:2]
+                    image_size = (w, h)
+                    break
+
+        if image_size is None:
+            return np.zeros((1, 1), dtype=np.int32)
+
+        # Sort by score (lowest first so higher scores overwrite)
+        sorted_dets = sorted(detections, key=lambda x: x.get("score", 0))
+
+        # Paint masks with instance IDs
+        labeled_mask = np.zeros((image_size[1], image_size[0]), dtype=np.int32)
+        for i, det in enumerate(sorted_dets, start=1):
+            mask = det.get("mask")
+            if mask is not None:
+                # Ensure mask matches expected size
+                if mask.shape[:2] != (image_size[1], image_size[0]):
+                    mask = cv2.resize(
+                        mask.astype(np.float32),
+                        image_size,
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                labeled_mask[mask > 0] = i
+
+        return labeled_mask
+
+    # =========================================================================
+    # Automatic Mask Generation (AMG)
+    # =========================================================================
+
+    def automatic_mask_generation(
+        self,
+        image: Image.Image,
+        points_per_side: int = 32,
+        pred_iou_thresh: float = 0.88,
+        stability_score_thresh: float = 0.95,
+        stability_score_offset: float = 1.0,
+        box_nms_thresh: float = 0.7,
+        min_mask_region_area: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate masks for all objects in an image using a grid of point prompts.
+
+        This implements SAM's Automatic Mask Generation (AMG) mode, which samples
+        single-point prompts in a grid over the image and filters the resulting masks.
+
+        Args:
+            image: PIL Image
+            points_per_side: Number of points to sample per side of the grid (32 = 1024 points)
+            pred_iou_thresh: Filter masks with predicted IoU below this threshold
+            stability_score_thresh: Filter masks with stability score below this threshold
+            stability_score_offset: Offset for stability score calculation
+            box_nms_thresh: IoU threshold for NMS to remove duplicate masks
+            min_mask_region_area: Remove masks with area smaller than this (requires cv2)
+
+        Returns:
+            List of mask records: [{"mask": np.ndarray, "box": [x,y,w,h], "area": int,
+                                    "predicted_iou": float, "stability_score": float}, ...]
+        """
+        decoder = self._get_tracker_decoder()
+        orig_w, orig_h = image.size
+
+        # Encode image once
+        embeddings = self.encode(image)
+
+        # Generate point grid normalized to [0, 1]
+        points_grid = self._build_point_grid(points_per_side)
+
+        # Process points in batches
+        all_masks = []
+        all_iou_preds = []
+        all_points = []
+
+        for point_xy in points_grid:
+            # Convert from [0,1] to image coordinates
+            point_x = point_xy[0] * SAM3_IMAGE_SIZE
+            point_y = point_xy[1] * SAM3_IMAGE_SIZE
+
+            # Run decoder with single positive point prompt
+            point_coords = np.array([[[[point_x, point_y]]]], dtype=np.float32)
+            point_labels = np.array([[[1.0]]], dtype=np.float32)
+
+            try:
+                result = self._run_tracker_decoder(
+                    embeddings, point_coords, point_labels
+                )
+
+                if result is not None:
+                    masks = result["masks"]  # [1, 3, 1008, 1008]
+                    iou_preds = result["iou_predictions"]  # [1, 3]
+
+                    # Add all 3 mask candidates
+                    for mask_idx in range(3):
+                        all_masks.append(masks[0, mask_idx])  # [1008, 1008]
+                        all_iou_preds.append(iou_preds[0, mask_idx])
+                        all_points.append([point_x, point_y])
+            except Exception as e:
+                logger.debug(f"Point prompt at ({point_x:.1f}, {point_y:.1f}) failed: {e}")
+                continue
+
+        if not all_masks:
+            logger.warning("No masks generated from point grid")
+            return []
+
+        # Convert to numpy arrays
+        all_masks = np.stack(all_masks, axis=0)  # [N, 1008, 1008]
+        all_iou_preds = np.array(all_iou_preds)
+        all_points = np.array(all_points)
+
+        # Filter by predicted IoU
+        keep = all_iou_preds > pred_iou_thresh
+        all_masks = all_masks[keep]
+        all_iou_preds = all_iou_preds[keep]
+        all_points = all_points[keep]
+
+        if len(all_masks) == 0:
+            return []
+
+        # Calculate stability scores
+        stability_scores = self._calculate_stability_scores(
+            all_masks, stability_score_offset
+        )
+
+        # Filter by stability score
+        keep = stability_scores >= stability_score_thresh
+        all_masks = all_masks[keep]
+        all_iou_preds = all_iou_preds[keep]
+        all_points = all_points[keep]
+        stability_scores = stability_scores[keep]
+
+        if len(all_masks) == 0:
+            return []
+
+        # Binarize masks
+        all_masks = (all_masks > 0).astype(np.float32)
+
+        # Calculate boxes from masks
+        boxes = self._batched_mask_to_box(all_masks)
+
+        # Apply NMS
+        keep_idxs = self._nms_boxes(boxes, all_iou_preds, box_nms_thresh)
+        all_masks = all_masks[keep_idxs]
+        all_iou_preds = all_iou_preds[keep_idxs]
+        all_points = all_points[keep_idxs]
+        stability_scores = stability_scores[keep_idxs]
+        boxes = boxes[keep_idxs]
+
+        # Resize masks to original size and format results
+        results = []
+        for i in range(len(all_masks)):
+            mask = all_masks[i]
+            if mask.shape != (orig_h, orig_w):
+                mask = cv2.resize(mask, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+            mask_binary = (mask > 0.5).astype(np.uint8)
+
+            # Calculate area
+            area = int(mask_binary.sum())
+
+            # Filter by min area
+            if min_mask_region_area > 0 and area < min_mask_region_area:
+                continue
+
+            # Scale box to original size
+            box = boxes[i]
+            scale_x = orig_w / SAM3_IMAGE_SIZE
+            scale_y = orig_h / SAM3_IMAGE_SIZE
+            box_scaled = [
+                float(box[0] * scale_x),
+                float(box[1] * scale_y),
+                float((box[2] - box[0]) * scale_x),  # width
+                float((box[3] - box[1]) * scale_y),  # height
+            ]
+
+            results.append({
+                "mask": mask_binary,
+                "box": box_scaled,  # XYWH format
+                "area": area,
+                "predicted_iou": float(all_iou_preds[i]),
+                "stability_score": float(stability_scores[i]),
+                "point_coords": [[float(all_points[i][0]), float(all_points[i][1])]],
+            })
+
+        logger.info(f"Automatic mask generation: {len(results)} masks from {len(points_grid)} points")
+        return results
+
+    def _build_point_grid(self, n_per_side: int) -> np.ndarray:
+        """Build a grid of points normalized to [0, 1]."""
+        offset = 1 / (2 * n_per_side)
+        points_one_side = np.linspace(offset, 1 - offset, n_per_side)
+        points_x = np.tile(points_one_side, n_per_side)
+        points_y = np.repeat(points_one_side, n_per_side)
+        return np.stack([points_x, points_y], axis=-1)
+
+    def _run_tracker_decoder(
+        self,
+        embeddings: Dict[str, np.ndarray],
+        point_coords: np.ndarray,
+        point_labels: np.ndarray,
+    ) -> Optional[Dict[str, np.ndarray]]:
+        """Run tracker decoder with point prompts."""
+        decoder = self._get_tracker_decoder()
+
+        fpn_feat_0 = embeddings.get("fpn_feat_0")
+        fpn_feat_1 = embeddings.get("fpn_feat_1")
+        fpn_feat_2 = embeddings.get("fpn_feat_2")
+
+        if fpn_feat_0 is None or fpn_feat_1 is None or fpn_feat_2 is None:
+            return None
+
+        inputs = {
+            "fpn_feat_0": fpn_feat_0,
+            "fpn_feat_1": fpn_feat_1,
+            "fpn_feat_2": fpn_feat_2,
+            "point_coords": point_coords,
+            "point_labels": point_labels,
+            "mask_input": np.zeros((1, 1, 288, 288), dtype=np.float32),
+            "has_mask_input": np.array([0.0], dtype=np.float32),
+        }
+
+        outputs = decoder.run(None, inputs)
+
+        return {
+            "masks": outputs[0],  # [B, 3, 1008, 1008]
+            "iou_predictions": outputs[1],  # [B, 3]
+            "low_res_masks": outputs[2],  # [B, 3, 288, 288]
+            "object_score_logits": outputs[3],  # [B, 1]
+        }
+
+    def _calculate_stability_scores(
+        self,
+        masks: np.ndarray,
+        offset: float = 1.0,
+    ) -> np.ndarray:
+        """Calculate mask stability scores by comparing different thresholds."""
+        high_threshold_masks = masks > 0.5 + offset
+        low_threshold_masks = masks > 0.5 - offset
+
+        high_areas = high_threshold_masks.sum(axis=(1, 2))
+        low_areas = low_threshold_masks.sum(axis=(1, 2))
+
+        # Stability = IoU of high and low threshold masks
+        intersection = high_areas
+        union = low_areas
+        stability = np.where(union > 0, intersection / union, 1.0)
+        return stability
+
+    def _batched_mask_to_box(self, masks: np.ndarray) -> np.ndarray:
+        """Convert masks to bounding boxes [x1, y1, x2, y2]."""
+        n_masks = masks.shape[0]
+        boxes = np.zeros((n_masks, 4), dtype=np.float32)
+
+        for i in range(n_masks):
+            mask = masks[i] > 0
+            ys, xs = np.where(mask)
+            if len(xs) > 0:
+                boxes[i] = [xs.min(), ys.min(), xs.max(), ys.max()]
+
+        return boxes
+
+    def _nms_boxes(
+        self,
+        boxes: np.ndarray,
+        scores: np.ndarray,
+        iou_thresh: float,
+    ) -> np.ndarray:
+        """Apply non-maximum suppression to boxes."""
+        if len(boxes) == 0:
+            return np.array([], dtype=np.int64)
+
+        x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+        areas = (x2 - x1) * (y2 - y1)
+
+        order = scores.argsort()[::-1]
+        keep = []
+
+        while len(order) > 0:
+            i = order[0]
+            keep.append(i)
+
+            if len(order) == 1:
+                break
+
+            # Compute IoU with remaining boxes
+            xx1 = np.maximum(x1[i], x1[order[1:]])
+            yy1 = np.maximum(y1[i], y1[order[1:]])
+            xx2 = np.minimum(x2[i], x2[order[1:]])
+            yy2 = np.minimum(y2[i], y2[order[1:]])
+
+            w = np.maximum(0, xx2 - xx1)
+            h = np.maximum(0, yy2 - yy1)
+            inter = w * h
+
+            iou = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
+
+            inds = np.where(iou <= iou_thresh)[0]
+            order = order[inds + 1]
+
+        return np.array(keep, dtype=np.int64)
+
     # =========================================================================
     # Video Tracking
     # =========================================================================
+
+    def init_tracking_from_text(
+        self,
+        image: Image.Image,
+        text_prompts: List[str],
+        confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
+    ) -> Dict[str, Any]:
+        """
+        Initialize video tracking from text prompts (Video PCS mode).
+
+        Detects objects matching text prompts in the first frame, then sets up
+        tracking for subsequent frames.
+
+        Args:
+            image: First frame as PIL Image
+            text_prompts: List of text prompts to detect (e.g., ["person", "car"])
+            confidence_threshold: Minimum confidence for detections
+
+        Returns:
+            Dict with session_id, initial detections, and tracked objects
+        """
+        # First, detect objects using text-to-segment
+        detections = self.text_to_segment(
+            text_prompts=text_prompts,
+            image=image,
+            confidence_threshold=confidence_threshold,
+        )
+
+        if not detections:
+            return {
+                "session_id": None,
+                "error": "No objects detected matching text prompts",
+                "detections": [],
+            }
+
+        # Convert detections to tracking objects
+        objects = []
+        for i, det in enumerate(detections):
+            box = det.get("box", [0, 0, 1, 1])
+            # Convert from xyxy to list if needed
+            if isinstance(box, np.ndarray):
+                box = box.tolist()
+            objects.append({
+                "object_id": i,
+                "box": box,
+                "label": det.get("label", "object"),
+            })
+
+        # Initialize tracking
+        tracking_result = self.init_tracking(image, objects)
+
+        # Add detection info to result
+        tracking_result["detections"] = detections
+        tracking_result["text_prompts"] = text_prompts
+
+        return tracking_result
 
     def init_tracking(
         self,
@@ -804,26 +1314,45 @@ class UnifiedModelHandler:
         return {"cleared": success, "session_id": session_id}
 
     def get_model_info(self) -> Dict[str, Any]:
-        """Get information about available models."""
+        """Get information about available models and capabilities."""
+        has_vision = os.path.exists(self.paths["vision_encoder"])
+        has_text = os.path.exists(self.paths["text_encoder"])
+        has_pcs = os.path.exists(self.paths["pcs_decoder"])
+        has_tracker = os.path.exists(self.paths["tracker_decoder"])
+
+        capabilities = []
+        if has_vision:
+            capabilities.append("encode")
+            capabilities.append("encode_batch")
+        if has_vision and has_text and has_pcs:
+            capabilities.append("text_to_segment")
+            capabilities.append("text_to_segment_with_boxes")
+            capabilities.append("get_semantic_mask")
+            capabilities.append("get_labeled_semantic_mask")
+        if has_vision and has_tracker:
+            capabilities.append("track")
+            capabilities.append("init_tracking")
+            capabilities.append("track_frame")
+            capabilities.append("automatic_mask_generation")
+        if has_vision and has_text and has_pcs and has_tracker:
+            capabilities.append("init_tracking_from_text")  # Video PCS
+
         return {
-            "vision_encoder": os.path.exists(self.paths["vision_encoder"]),
-            "text_encoder": os.path.exists(self.paths["text_encoder"]),
-            "pcs_decoder": os.path.exists(self.paths["pcs_decoder"]),
-            "tracker_decoder": os.path.exists(self.paths["tracker_decoder"]),
+            "vision_encoder": has_vision,
+            "text_encoder": has_text,
+            "pcs_decoder": has_pcs,
+            "tracker_decoder": has_tracker,
             "model_dir": self.paths["model_dir"],
             "device": self.device,
-            "capabilities": [
-                "encode" if os.path.exists(self.paths["vision_encoder"]) else None,
-                "text_to_segment" if (
-                    os.path.exists(self.paths["vision_encoder"]) and
-                    os.path.exists(self.paths["text_encoder"]) and
-                    os.path.exists(self.paths["pcs_decoder"])
-                ) else None,
-                "track" if (
-                    os.path.exists(self.paths["vision_encoder"]) and
-                    os.path.exists(self.paths["tracker_decoder"])
-                ) else None,
-            ],
+            "capabilities": capabilities,
+            "features": {
+                "box_prompts": has_pcs,  # Box prompts for PCS
+                "negative_prompts": has_pcs,  # Negative boxes (exclude regions)
+                "batched_inference": has_vision,  # encode_batch
+                "automatic_mask_generation": has_tracker,  # AMG
+                "semantic_segmentation": has_pcs,  # get_semantic_mask
+                "video_pcs": has_vision and has_text and has_pcs and has_tracker,
+            },
         }
 
 
@@ -841,13 +1370,15 @@ def get_handler() -> UnifiedModelHandler:
     if _handler is None:
         with _handler_lock:
             if _handler is None:
-                # Check for GPU
-                try:
-                    import onnxruntime as ort
-                    providers = ort.get_available_providers()
-                    device = "cuda" if "CUDAExecutionProvider" in providers else "cpu"
-                except:
-                    device = "cpu"
+                # Check environment variable first, then auto-detect
+                device = os.environ.get("SAM3_DEVICE")
+                if device is None:
+                    try:
+                        import onnxruntime as ort
+                        providers = ort.get_available_providers()
+                        device = "cuda" if "CUDAExecutionProvider" in providers else "cpu"
+                    except:
+                        device = "cpu"
                 logger.info(f"Initializing UnifiedModelHandler on {device}")
                 _handler = UnifiedModelHandler(device=device)
     return _handler

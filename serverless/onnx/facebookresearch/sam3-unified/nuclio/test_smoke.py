@@ -35,7 +35,7 @@ def print_info(msg):
     print(f"  \033[94mℹ\033[0m {msg}")
 
 
-def test_vision_encoder(model_path: Path) -> bool:
+def test_vision_encoder(model_path: Path, device: str = "cpu") -> bool:
     """Test vision encoder loads and produces correct output shapes."""
     import onnxruntime as ort
 
@@ -45,10 +45,11 @@ def test_vision_encoder(model_path: Path) -> bool:
         print_fail(f"Not found: {model_path}")
         return False
 
+    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if device == 'cuda' else ['CPUExecutionProvider']
     try:
         session = ort.InferenceSession(
             str(model_path),
-            providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
+            providers=providers
         )
         print_ok(f"Loaded: {model_path.name}")
     except Exception as e:
@@ -90,7 +91,7 @@ def test_vision_encoder(model_path: Path) -> bool:
     return True
 
 
-def test_tracker_decoder(model_path: Path) -> bool:
+def test_tracker_decoder(model_path: Path, device: str = "cpu") -> bool:
     """Test tracker decoder loads and produces correct output shapes."""
     import onnxruntime as ort
 
@@ -100,10 +101,11 @@ def test_tracker_decoder(model_path: Path) -> bool:
         print_fail(f"Not found: {model_path}")
         return False
 
+    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if device == 'cuda' else ['CPUExecutionProvider']
     try:
         session = ort.InferenceSession(
             str(model_path),
-            providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
+            providers=providers
         )
         print_ok(f"Loaded: {model_path.name}")
     except Exception as e:
@@ -153,20 +155,21 @@ def test_tracker_decoder(model_path: Path) -> bool:
     return True
 
 
-def test_text_encoder(model_path: Path) -> bool:
+def test_text_encoder(model_path: Path, device: str = "cpu") -> bool:
     """Test text encoder loads and produces correct output shapes."""
     import onnxruntime as ort
 
     print("\n[Text Encoder]")
 
     if not model_path.exists():
-        print_info(f"Not found: {model_path} (optional)")
-        return True  # Text encoder is optional
+        print_info(f"Not found: {model_path} (skipped - optional model)")
+        return None  # Return None to indicate skipped (not True=pass, not False=fail)
 
+    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if device == 'cuda' else ['CPUExecutionProvider']
     try:
         session = ort.InferenceSession(
             str(model_path),
-            providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
+            providers=providers
         )
         print_ok(f"Loaded: {model_path.name}")
     except Exception as e:
@@ -201,12 +204,13 @@ def test_text_encoder(model_path: Path) -> bool:
     return True
 
 
-def test_unified_handler(model_dir: Path) -> bool:
+def test_unified_handler(model_dir: Path, device: str = "cpu") -> bool:
     """Test the unified handler module."""
     print("\n[Unified Handler]")
 
     # Set environment variables
     os.environ["SAM3_MODEL_DIR"] = str(model_dir)
+    os.environ["SAM3_DEVICE"] = device
     os.environ["SAM3_VISION_ENCODER"] = str(model_dir / "vision_encoder.onnx")
     os.environ["SAM3_TEXT_ENCODER"] = str(model_dir / "text_encoder.onnx")
     os.environ["SAM3_PCS_DECODER"] = str(model_dir / "pcs_decoder.onnx")
@@ -217,14 +221,15 @@ def test_unified_handler(model_dir: Path) -> bool:
     sys.path.insert(0, str(handler_dir))
 
     try:
-        from model_handler import get_handler
+        from model_handler import get_handler, reset_handler
         print_ok("Imported model_handler")
     except ImportError as e:
         print_fail(f"Import failed: {e}")
         return False
 
-    # Get handler instance
+    # Get handler instance (reset first to pick up SAM3_DEVICE env var)
     try:
+        reset_handler()
         handler = get_handler()
         print_ok("Created handler instance")
     except Exception as e:
@@ -261,22 +266,25 @@ def test_unified_handler(model_dir: Path) -> bool:
 def main():
     parser = argparse.ArgumentParser(description="SAM3 ONNX Smoke Tests")
     parser.add_argument("--model-dir", type=str, required=True, help="ONNX model directory")
+    parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"], help="Device for inference")
     args = parser.parse_args()
 
     model_dir = Path(args.model_dir)
+    device = args.device
 
     print("=" * 60)
     print("SAM3 Unified ONNX Smoke Tests")
     print("=" * 60)
     print(f"Model directory: {model_dir}")
+    print(f"Device: {device}")
 
     results = []
 
     # Run tests
-    results.append(("Vision Encoder", test_vision_encoder(model_dir / "vision_encoder.onnx")))
-    results.append(("Tracker Decoder", test_tracker_decoder(model_dir / "tracker_decoder.onnx")))
-    results.append(("Text Encoder", test_text_encoder(model_dir / "text_encoder.onnx")))
-    results.append(("Unified Handler", test_unified_handler(model_dir)))
+    results.append(("Vision Encoder", test_vision_encoder(model_dir / "vision_encoder.onnx", device)))
+    results.append(("Tracker Decoder", test_tracker_decoder(model_dir / "tracker_decoder.onnx", device)))
+    results.append(("Text Encoder", test_text_encoder(model_dir / "text_encoder.onnx", device)))
+    results.append(("Unified Handler", test_unified_handler(model_dir, device)))
 
     # Summary
     print("\n" + "=" * 60)
@@ -284,15 +292,24 @@ def main():
     print("=" * 60)
 
     all_passed = True
+    skipped_count = 0
     for name, passed in results:
-        status = "\033[92mPASS\033[0m" if passed else "\033[91mFAIL\033[0m"
-        print(f"  {name}: {status}")
-        if not passed:
+        if passed is None:
+            status = "\033[93mSKIP\033[0m"
+            skipped_count += 1
+        elif passed:
+            status = "\033[92mPASS\033[0m"
+        else:
+            status = "\033[91mFAIL\033[0m"
             all_passed = False
+        print(f"  {name}: {status}")
 
     print()
     if all_passed:
-        print("\033[92m\033[1mAll smoke tests passed!\033[0m")
+        if skipped_count > 0:
+            print(f"\033[92m\033[1mAll smoke tests passed! ({skipped_count} skipped)\033[0m")
+        else:
+            print("\033[92m\033[1mAll smoke tests passed!\033[0m")
     else:
         print("\033[91m\033[1mSome tests failed!\033[0m")
 

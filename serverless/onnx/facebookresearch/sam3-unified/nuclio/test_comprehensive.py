@@ -647,7 +647,11 @@ def run_shape_tests(tester: SAM3OnnxTester) -> List[TestResult]:
 
     if tester.encoder is None or tester.decoder is None:
         print_warn("Cannot run shape tests without both models")
-        return []
+        return [TestResult(
+            name="shape_tests_skipped",
+            passed=False,
+            details="Missing encoder or decoder models",
+        )]
 
     results = []
     test_cases = generate_test_cases()
@@ -692,7 +696,11 @@ def run_refinement_tests(tester: SAM3OnnxTester) -> List[TestResult]:
     print_section("Mask Refinement Tests")
 
     if tester.encoder is None or tester.decoder is None:
-        return []
+        return [TestResult(
+            name="refinement_tests_skipped",
+            passed=False,
+            details="Missing encoder or decoder models",
+        )]
 
     results = []
 
@@ -745,7 +753,11 @@ def run_pytorch_comparison(model_dir: Path, device: str = "cuda") -> List[TestRe
         import onnxruntime as ort
     except ImportError as e:
         print_warn(f"Missing dependency: {e}")
-        return []
+        return [TestResult(
+            name="pytorch_comparison_skipped",
+            passed=False,
+            details=f"Missing dependency: {e}",
+        )]
 
     # Try to load HuggingFace model
     try:
