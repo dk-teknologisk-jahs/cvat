@@ -67,6 +67,7 @@ cvat-ui/dist
 
 # External repositories cloned for reference/development
 /sam3/
+/sam3_huggingface/
 /usls/
 /cvat-yoloe-sam/
 
