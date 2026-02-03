@@ -98,20 +98,15 @@ spec:
       # ONNX MODELS - Downloaded from GitHub release
       # =======================================================================
       # Models are pre-exported and hosted on GitHub releases.
-      # Alternative: Set HF_TOKEN build arg to export from HuggingFace.
+      # Download URL: https://github.com/dk-teknologisk-jahs/cvat/releases/tag/sam3
       # =======================================================================
-        - kind: COPY
-          value: download_models.py /opt/nuclio/sam3/download_models.py
-        - kind: ARG
-          value: SAM3_MODEL_SOURCE=github
-        - kind: ARG
-          value: HF_TOKEN=""
         - kind: RUN
           value: |
-            python3 /opt/nuclio/sam3/download_models.py \
-              --output-dir /opt/nuclio/sam3/models \
-              --source ${SAM3_MODEL_SOURCE} \
-              ${HF_TOKEN:+--hf-token $HF_TOKEN}
+            cd /opt/nuclio/sam3/models && \
+            curl -L -o vision_encoder.onnx "https://github.com/dk-teknologisk-jahs/cvat/releases/download/sam3/vision_encoder.onnx" && \
+            curl -L -o tracker_decoder.onnx "https://github.com/dk-teknologisk-jahs/cvat/releases/download/sam3/tracker_decoder.onnx" && \
+            curl -L -o text_encoder.onnx "https://github.com/dk-teknologisk-jahs/cvat/releases/download/sam3/text_encoder.onnx" && \
+            curl -L -o pcs_decoder.onnx "https://github.com/dk-teknologisk-jahs/cvat/releases/download/sam3/pcs_decoder.onnx"
       # Map python3 to python
         - kind: RUN
           value: ln -s /usr/bin/pip3 /usr/local/bin/pip && ln -s /usr/bin/python3 /usr/bin/python
