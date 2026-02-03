@@ -1,11 +1,18 @@
 # This file keeps the assets directory in git.
 #
-# The default decoder is the custom export with mask refinement support:
-# - tracker-prompt-encoder-mask-decoder-with-mask-input.onnx (17MB) **default**
+# SAM3 ONNX Assets for Browser-Side Inference
+# ============================================
 #
-# To generate it, run the export script in serverless/pytorch/facebookresearch/sam3/nuclio/:
-#   python export_decoder_with_mask_input.py --checkpoint auto --output <path>
+# DECODER (for interactive annotation):
+# - tracker_decoder.onnx (22MB) - HuggingFace unified decoder with mask refinement
+# - tracker-prompt-encoder-mask-decoder-with-mask-input.onnx (17MB) - alternate
 #
-# Alternatively, download pre-built decoders from usls (no mask refinement):
-# wget -O tracker-prompt-encoder-mask-decoder.onnx \
-#   "https://github.com/jamjamjon/assets/releases/download/sam3/tracker-prompt-encoder-mask-decoder.onnx"
+# NOTE: Memory components (memory_attention, memory_encoder, object_pointer)
+# run SERVER-SIDE only. Video propagation uses CVAT tracker interface with
+# Redis-backed state management. Do not add memory models to browser assets.
+#
+# To generate decoder, run the export script in serverless/pytorch/facebookresearch/sam3/nuclio/:
+#
+#   python export_hf_onnx.py
+#
+# All exports use opset 17 for onnxruntime-web 1.14.0 compatibility.

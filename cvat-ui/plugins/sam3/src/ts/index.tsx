@@ -13,6 +13,10 @@
  * 2. Browser: tracker-prompt-encoder-mask-decoder-with-mask-input.onnx → decodes clicks to masks
  *
  * This enables fast interactive refinement (<100ms per click).
+ *
+ * Video Propagation:
+ * Uses CVAT tracker interface - server-side with Redis state management.
+ * Memory components (memory_attention, memory_encoder, object_pointer) run on server.
  */
 
 import { Tensor } from 'onnxruntime-web';

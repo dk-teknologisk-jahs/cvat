@@ -2,7 +2,7 @@
 
 This document describes SAM3 architecture, ONNX export strategies, and how SAM3 covers **all three CVAT AI tool categories**: Interactor, Detector, and Tracker.
 
-> **Last Updated**: 1 February 2026 (All ONNX tests passing - 100% correlation with PyTorch)
+> **Last Updated**: 3 February 2026 (Memory components exported, server-side video propagation implemented)
 
 ---
 
@@ -38,15 +38,21 @@ This means:
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| **Vision Encoder** | ✅ Exported & Verified | 1789 MB, outputs 256ch at all FPN levels, correlation=1.0 |
+| **Vision Encoder** | ✅ Exported & Verified | 1.74 GB, outputs 256ch at all FPN levels, correlation=1.0 |
 | **Tracker Decoder** | ✅ Exported & Verified | 21.4 MB, includes conv_s0/conv_s1 projections, correlation=1.0 |
-| **Text Encoder** | ✅ Exported & Verified | 1.3 GB, CLIP + projection (32-token context), correlation=1.0 |
+| **Text Encoder** | ✅ Exported & Verified | 1.31 GB, CLIP + projection (32-token context), correlation=1.0 |
 | **PCS Decoder** | ✅ Exported & Verified | 123 MB, DETR encoder/decoder + heads, full pipeline tested |
+| **Memory Attention** | ✅ Exported & Verified | 155 MB, conditions features with past memory, 16/16 tests pass |
+| **Memory Encoder** | ✅ Exported & Verified | 5.3 MB, encodes masks into memory features, 16/16 tests pass |
+| **Object Pointer** | ✅ Exported & Verified | 776 KB, extracts object pointer, 16/16 tests pass |
+| **Temporal Pos Enc** | ✅ Exported | 2 KB, pre-computed lookup table |
 | **Export Script** | ✅ Fixed | Uses Sam3TrackerModel for PVS, Sam3Model for PCS |
-| **Verification Tests** | ✅ All Passing | 6/6 tests pass with 100% correlation |
-| **Unified ONNX Handler** | ✅ Implemented | `model_handler.py` with dynamic model paths |
+| **Memory Export Script** | ✅ Created | `export_sam3_memory_components.py` for video propagation |
+| **Verification Tests** | ✅ All Passing | 6/6 core tests + 16/16 memory tests pass |
+| **Unified ONNX Handler** | ✅ Implemented | `model_handler.py` with dynamic model paths + memory support |
 | **Redis State Management** | ✅ Implemented | Video tracking session state in Redis |
-| **Comprehensive Test Suite** | ✅ Created | `test_onnx_unified.py` with PyTorch comparison |
+| **Server-Side Tracking** | ✅ Implemented | `_track_with_memory()` using ONNX memory components |
+| **GitHub Release Hosting** | ✅ Complete | All 8 models hosted at dk-teknologisk-jahs/cvat releases |
 | **Browser Integration** | ✅ Implemented | `inference.worker.ts` supports unified decoder (256ch, 4D points) |
 
 #### 🔄 Next Steps (Priority Order)
@@ -55,9 +61,8 @@ This means:
 |---|------|--------|-------|
 | 1 | **Add handler API tests** | 🔲 TODO | Test `text_to_segment()` and tracking through handler |
 | 2 | **Add video tracking tests** | 🔲 TODO | Test `init_tracking()` / `track_frame()` with mock Redis |
-| 3 | **Host ONNX models** | 🔲 TODO | Upload to GitHub releases for Docker builds |
-| 4 | **Create Dockerfile** | 🔲 TODO | Download models or export if missing |
-| 5 | **Integration testing** | 🔲 TODO | Full CVAT integration with browser UI |
+| 3 | **Create Dockerfile** | 🔲 TODO | Download models from GitHub releases |
+| 4 | **Integration testing** | 🔲 TODO | Full CVAT integration with browser UI |
 
 ---
 
@@ -101,9 +106,10 @@ All tests passed!
 3. **Multi-object tracking** - Test tracking multiple objects simultaneously
 4. **Edge cases** - Empty images, invalid prompts, session timeout
 
-#### ONNX Model Hosting Strategy
+#### ONNX Model Hosting Strategy ✅ COMPLETE
 
-**Approach**: Create a GitHub repository (e.g., `cvat-ai/sam3-onnx-models`) and upload exported ONNX models as **release files**. This mirrors the approach used by [usls](https://github.com/jamjamjon/usls).
+**Current Hosting**: All models are hosted on GitHub releases at:
+`https://github.com/dk-teknologisk-jahs/cvat/releases/tag/sam3`
 
 **Why GitHub Releases?**
 - Free hosting for large files (up to 2 GB per file)
@@ -111,43 +117,48 @@ All tests passed!
 - Version control via release tags
 - Direct download URLs for Docker builds
 
+**Auto-Download**: The `model_handler.py` automatically downloads missing models from the release URL configured in `SAM3_GITHUB_RELEASE_URL` environment variable (defaults to the URL above).
+
 **Docker Build Strategy**:
-1. Try to download pre-exported models from GitHub releases
+1. Try to download pre-exported models from GitHub releases (no auth required)
 2. If download fails or models missing, export them using `export_hf_onnx.py`
-3. This requires HuggingFace auth at build time (for gated `facebook/sam3` model)
+3. Export requires HuggingFace auth (for gated `facebook/sam3` model)
 
-**⚠️ HuggingFace Token Required for Export**:
-The `facebook/sam3` model is **gated** - you must pass a HuggingFace token to export:
+**⚠️ HuggingFace Token Required for Export Only**:
+The `facebook/sam3` model is **gated** - you must pass a HuggingFace token to re-export:
 ```bash
-# Option 1: Environment variable
+# Only needed if re-exporting models
 docker build --build-arg HF_TOKEN=$HF_TOKEN ...
-
-# Option 2: Docker secret (more secure)
-docker build --secret id=hf_token,env=HF_TOKEN ...
 ```
 
-**Example Dockerfile snippet**:
-```dockerfile
-# Try to download pre-exported models, fallback to export
-RUN mkdir -p /opt/nuclio/sam3/models && \
-    (curl -L https://github.com/cvat-ai/sam3-onnx-models/releases/download/v1.0/vision-encoder.onnx \
-         -o /opt/nuclio/sam3/models/vision-encoder.onnx || \
-     python export_hf_onnx.py --vision-encoder --output-dir /opt/nuclio/sam3/models)
+#### Hosted ONNX Models (GitHub Release: sam3)
+
+| Model | Size | Purpose |
+|-------|------|---------|
+| `vision_encoder.onnx` | 1.74 GB | Vision transformer encoder |
+| `text_encoder.onnx` | 1.31 GB | CLIP text encoder for PCS mode |
+| `pcs_decoder.onnx` | 123 MB | Promptable Cascade Segmentation decoder |
+| `tracker_decoder.onnx` | 21.4 MB | Point-based tracker decoder |
+| `memory_attention.onnx` | 155 MB | Conditions features with past memory |
+| `memory_encoder.onnx` | 5.3 MB | Encodes masks into memory features |
+| `object_pointer.onnx` | 776 KB | Extracts object pointer from decoder |
+| `temporal_pos_enc.npy` | 2 KB | Temporal position encoding table |
+| **Total** | **~3.5 GB** | |
+
+**Download URL Pattern**:
+```
+https://github.com/dk-teknologisk-jahs/cvat/releases/download/sam3/{model_name}
 ```
 
-#### Exported ONNX Models (Ready for Hosting)
+#### Export Commands (For Re-Export Only)
 
-| Model | Size | Export Command |
-|-------|------|----------------|
-| `vision-encoder.onnx` | 1.79 GB | `python export_hf_onnx.py --vision-encoder` |
-| `tracker-decoder.onnx` | 21.4 MB | `python export_hf_onnx.py --tracker-decoder` |
-| `text-encoder.onnx` | 1.35 GB | `python export_hf_onnx.py --text-encoder` |
-| `pcs-decoder.onnx` | 123 MB | `python export_hf_onnx.py --pcs-decoder` |
-| **Total** | **~3.3 GB** | `python export_hf_onnx.py --all` |
+```bash
+# Core models
+python export_hf_onnx.py --all --output-dir /opt/nuclio/sam3/models
 
-**Export location**: `/tmp/sam3-onnx-pcs/` (or specify with `--output-dir`)
-
-**Environment**: Use `conda run -n grimme-tf2.18` for export (requires PyTorch 2.6+, transformers with SAM3 support)
+# Memory components
+python export_sam3_memory_components.py
+```
 
 #### ⚠️ CRITICAL FINDING: Sam3Model vs Sam3TrackerModel
 
@@ -311,18 +322,28 @@ Create a **single nuclio function** that handles all three CVAT AI tool types, s
 
 1. ✅ **Update `sam3-unified` function** to add video tracking mode
    - ✅ Added Redis dependency for session state (`RedisCache` class)
-   - ✅ Lazy load `Sam3VideoModel` only when tracking is used
+   - ✅ Memory models lazy-loaded only when tracking is used
    - ✅ Implemented CVAT tracker interface (`shapes` + `states` format)
    - ✅ Added `track/init`, `track/frame`, `track/clear` modes in `main.py`
+   - ✅ Implemented `_track_with_memory()` using ONNX memory components
 
-2. ✅ **Browser Integration** for interactor mode
+2. ✅ **Memory Components (Server-Side)**
+   - ✅ Exported `memory_attention.onnx` (155MB) - conditions features with memory
+   - ✅ Exported `memory_encoder.onnx` (5.3MB) - encodes masks to memory
+   - ✅ Exported `object_pointer.onnx` (776KB) - extracts object pointer
+   - ✅ Exported `temporal_pos_enc.npy` (2KB) - temporal position table
+   - ✅ All models hosted on GitHub release
+   - ✅ All 16 tests pass with PyTorch correlation
+
+3. ✅ **Browser Integration** for interactor mode
    - ✅ Updated `inference.worker.ts` to detect unified decoder (256ch inputs)
    - ✅ Added support for `fpn_feat_*` tensor names (new unified format)
    - ✅ Added 4D point_coords `[B, num_objects, num_points, 2]` for HuggingFace decoder
    - ✅ Added 3D point_labels `[B, num_objects, num_points]` for HuggingFace decoder
    - ✅ Backward compatible with legacy 32/64/256ch decoders
+   - ✅ Memory components run SERVER-SIDE only (too large for browser)
 
-3. 🔄 **End-to-End Testing**
+4. 🔄 **End-to-End Testing**
    - Test interactor mode (clicks → mask)
    - Test detector mode (text prompts → all instances)
    - Test tracker mode (propagate masks across frames)
@@ -346,9 +367,29 @@ Existing CVAT trackers (SiamMask, TransT) use this request/response format:
 }
 ```
 
-For SAM3, the `states` will contain a Redis session ID instead of the full memory bank:
+For SAM3, the `states` contains a Redis session ID instead of the full memory bank (which is ~18MB per object):
 ```python
 states = [{"session_id": "sam3_track_12345", "object_id": 1}, ...]
+```
+
+### Server-Side Memory Tracking Flow
+
+```
+init_tracking(image, objects):
+  └── encode(image) → FPN features
+  └── _decode_box_prompt() → initial mask
+  └── _encode_mask_to_memory() → initialize memory bank
+  └── Redis.set(session_id, {memory_bank, memory_pos_bank, frame_count})
+
+track_frame(session_id, image, frame_idx):
+  └── Redis.get(session_id) → load state
+  └── encode(image) → FPN features
+  └── _track_with_memory():
+      ├── memory_attention.onnx → condition features with past memory
+      ├── tracker_decoder.onnx → predict mask
+      ├── memory_encoder.onnx → encode new mask to memory
+      └── Update memory bank (FIFO, max 7 frames)
+  └── Redis.set(session_id, updated_state)
 ```
 
 ---

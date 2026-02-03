@@ -23,16 +23,23 @@ Similar to SAM2, this plugin uses a two-stage architecture:
 The plugin requires pre-exported ONNX models. These are exported using `export_hf_onnx.py`
 (requires HuggingFace authentication at export time, but NOT at runtime).
 
-**Server-side models** (deployed with Nuclio):
-- `vision_encoder.onnx` (~1.8GB) - Vision transformer encoder
-- `text_encoder.onnx` (~600MB) - CLIP text encoder for PCS mode
-- `pcs_decoder.onnx` (~150MB) - Promptable Cascade Segmentation decoder
-- `tracker_decoder.onnx` (~22MB) - Point-based tracker decoder
+**Server-side models** (deployed with Nuclio, auto-downloaded from GitHub release):
+- `vision_encoder.onnx` (1.74 GB) - Vision transformer encoder
+- `text_encoder.onnx` (1.31 GB) - CLIP text encoder for PCS mode
+- `pcs_decoder.onnx` (123 MB) - Promptable Cascade Segmentation decoder
+- `tracker_decoder.onnx` (22 MB) - Point-based tracker decoder
+- `memory_attention.onnx` (155 MB) - Memory conditioning for video propagation
+- `memory_encoder.onnx` (5.3 MB) - Encodes masks into memory features
+- `object_pointer.onnx` (776 KB) - Extracts object pointer from decoder
+- `temporal_pos_enc.npy` (2 KB) - Temporal position encoding table
 
 **Browser-side decoder** (in `cvat-ui/plugins/sam3/assets/`):
-- `tracker_decoder.onnx` (22MB) - Decoder with mask refinement support (from export_hf_onnx.py)
+- `tracker_decoder.onnx` (22MB) - Decoder with mask refinement support
 
 The unified decoder accepts 256-channel FPN features at all levels (matching the HuggingFace export).
+
+**Model Hosting**: All models are hosted on GitHub releases at:
+`https://github.com/dk-teknologisk-jahs/cvat/releases/tag/sam3`
 
 ### 2. Enable the Plugin
 
@@ -120,6 +127,65 @@ The unified decoder supports **iterative mask refinement** - feeding the previou
 The plugin automatically detects if the decoder supports mask input:
 - If `mask_input` found in inputs → refinement enabled
 - Otherwise → single-pass inference (still functional)
+
+## Video Propagation (Tracker Mode)
+
+SAM3 supports **server-side video propagation** using the CVAT tracker interface. Memory components run on the server with Redis-backed state management.
+
+### Architecture
+
+**Why Server-Side?**
+- Memory attention model is 155MB - too large for browser download
+- GPU acceleration via CUDA on server
+- Redis enables persistent state across requests
+- Follows existing CVAT tracker pattern (SiamMask, TransT)
+
+### Memory Components (Server-Side ONNX)
+
+These models are deployed with the Nuclio function (NOT in browser):
+- `memory_attention.onnx` (155MB) - Conditions current frame with past memory
+- `memory_encoder.onnx` (5.3MB) - Encodes masks into memory features
+- `object_pointer.onnx` (776KB) - Extracts object pointer from decoder
+- `temporal_pos_enc.npy` (2KB) - Temporal position encoding table
+
+### How It Works
+
+```
+Frame 1: init_tracking(image, objects)
+  └── Encode image → decode box prompt → get initial mask
+  └── Encode mask into memory bank
+  └── Store in Redis: {memory_bank, memory_pos_bank, frame_count}
+
+Frame 2+: track_frame(session_id, image, frame_idx)
+  └── Load state from Redis
+  └── memory_attention.onnx → condition current features with memory
+  └── tracker_decoder.onnx → predict mask
+  └── memory_encoder.onnx → encode new mask to memory
+  └── Update memory bank (FIFO, max 7 frames)
+  └── Store updated state in Redis
+```
+
+### CVAT Tracker Interface
+
+The tracker uses CVAT's standard tracker interface:
+- **Request**: `{image, shapes, states}` where `states` contains `session_id`
+- **Response**: `{shapes, states}` with updated masks and `session_id`
+- State is stored server-side in Redis (memory bank ~18MB per object)
+
+### Export Memory Components
+
+```bash
+cd serverless/pytorch/facebookresearch/sam3/nuclio
+python export_sam3_memory_components.py
+
+# Output in onnx-memory-exports/:
+# - memory_attention.onnx (155MB, 106 weights)
+# - memory_encoder.onnx (5MB, 40 weights)
+# - object_pointer.onnx (776KB, 6 weights)
+# - temporal_pos_enc.npy (2KB)
+```
+
+All exports use opset 17. Models are hosted on GitHub releases.
 
 ## Operation Modes
 
