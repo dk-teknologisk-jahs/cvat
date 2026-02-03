@@ -1,1 +1,9 @@
+# ONNX model files (hosted on GitHub releases)
 *.onnx
+*.npy
+
+# HuggingFace cache
+sam3_models/
+
+# ONNX export outputs (models uploaded to GitHub releases)
+onnx-memory-exports/
