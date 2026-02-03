@@ -95,18 +95,23 @@ spec:
         - kind: RUN
           value: mkdir -p /opt/nuclio/sam3/models
       # =======================================================================
-      # ONNX MODELS - Must be pre-exported and hosted somewhere accessible
+      # ONNX MODELS - Downloaded from GitHub release
       # =======================================================================
-      # Option 1: Copy from local build context (if building with models)
-      # Option 2: Download from your own hosting (e.g., S3, GCS, Azure Blob)
-      # Option 3: Mount as volume at runtime
-      #
-      # Example download commands (replace URLs with your hosted models):
-      # - kind: RUN
-      #   value: |
-      #     curl -L -o /opt/nuclio/sam3/models/vision_encoder.onnx \
-      #       "https://your-storage.com/sam3/vision_encoder.onnx"
+      # Models are pre-exported and hosted on GitHub releases.
+      # Alternative: Set HF_TOKEN build arg to export from HuggingFace.
       # =======================================================================
+        - kind: COPY
+          value: download_models.py /opt/nuclio/sam3/download_models.py
+        - kind: ARG
+          value: SAM3_MODEL_SOURCE=github
+        - kind: ARG
+          value: HF_TOKEN=""
+        - kind: RUN
+          value: |
+            python3 /opt/nuclio/sam3/download_models.py \
+              --output-dir /opt/nuclio/sam3/models \
+              --source ${SAM3_MODEL_SOURCE} \
+              ${HF_TOKEN:+--hf-token $HF_TOKEN}
       # Map python3 to python
         - kind: RUN
           value: ln -s /usr/bin/pip3 /usr/local/bin/pip && ln -s /usr/bin/python3 /usr/bin/python
