@@ -911,7 +911,16 @@ def main():
     parser.add_argument("--output-dir", type=str, default="./onnx-exports", help="Output directory")
     parser.add_argument("--device", type=str, default="cuda", help="Device (cuda or cpu)")
     parser.add_argument("--model-path", type=str, default="facebook/sam3", help="HuggingFace model path")
+    parser.add_argument("--hf-token", type=str, default=None, help="HuggingFace token for gated models (or set HF_TOKEN env var)")
     args = parser.parse_args()
+
+    # Get HuggingFace token from argument or environment variable
+    import os
+    hf_token = args.hf_token or os.environ.get("HF_TOKEN")
+    if hf_token:
+        print("Using HuggingFace token for authentication")
+    else:
+        print("No HuggingFace token provided. If the model is gated, you'll need to provide --hf-token or set HF_TOKEN env var")
 
     if not any([args.all, args.vision_encoder, args.tracker_decoder, args.text_encoder, args.pcs_decoder, args.verify]):
         parser.error("Please specify at least one export option or --verify")
@@ -938,14 +947,14 @@ def main():
     if args.all or args.vision_encoder or args.tracker_decoder or args.verify:
         print(f"\nLoading HuggingFace Sam3TrackerModel from {args.model_path}...")
         from transformers import Sam3TrackerModel
-        tracker_model = Sam3TrackerModel.from_pretrained(args.model_path).to(device).eval()
+        tracker_model = Sam3TrackerModel.from_pretrained(args.model_path, token=hf_token).to(device).eval()
         print(f"  Sam3TrackerModel loaded: {sum(p.numel() for p in tracker_model.parameters())} parameters")
 
     # Load Sam3Model for text encoder and PCS decoder
     if args.all or args.text_encoder or args.pcs_decoder:
         print(f"\nLoading HuggingFace Sam3Model from {args.model_path}...")
         from transformers import Sam3Model
-        pcs_model = Sam3Model.from_pretrained(args.model_path).to(device).eval()
+        pcs_model = Sam3Model.from_pretrained(args.model_path, token=hf_token).to(device).eval()
         print(f"  Sam3Model loaded: {sum(p.numel() for p in pcs_model.parameters())} parameters")
 
     # Export components
