@@ -1,0 +1,72 @@
+# Copyright (C) 2024-2026 CVAT.ai Corporation
+#
+# SPDX-License-Identifier: MIT
+
+# =============================================================================
+# SAM3 Interactor Proxy (GPU deploy script compatible)
+# =============================================================================
+#
+# Lightweight proxy that forwards interactor requests to the SAM3 detector function.
+# This allows SAM3 to appear in CVAT's interactor menu without loading models twice.
+#
+# Memory usage: ~50MB (no models loaded)
+# Requires: sam3-detector function must be deployed first (deploys first alphabetically)
+#
+# =============================================================================
+
+metadata:
+  name: onnx-facebookresearch-sam3-interactor-proxy
+  namespace: cvat
+  annotations:
+    name: SAM3 Interactor (ONNX)
+    version: 1
+    type: interactor
+    spec:
+    min_pos_points: 0
+    min_neg_points: 0
+    startswith_box_optional: true
+    framework: onnx
+    help_message: |
+      SAM3 interactive segmentation using point and box prompts.
+      Click positive/negative points or draw a box to segment objects.
+
+      Note: This is a proxy to the SAM3 detector function.
+
+spec:
+  description: SAM3 interactor (proxy to detector function)
+  runtime: 'python:3.10'
+  handler: main:handler
+  eventTimeout: 120s
+
+  env:
+    - name: SAM3_DETECTOR_URL
+      value: http://nuclio-nuclio-onnx-facebookresearch-sam3-detector:8080
+    - name: SAM3_PROXY_TIMEOUT
+      value: "120"
+
+  build:
+    image: cvat.onnx.facebookresearch.sam3.interactor.proxy:latest-gpu
+    baseImage: python:3.10-slim
+
+    directives:
+      preCopy:
+        - kind: ENV
+          value: DEBIAN_FRONTEND=noninteractive
+        - kind: RUN
+          value: pip3 install --no-cache-dir requests
+
+  triggers:
+    myHttpTrigger:
+      maxWorkers: 2
+      kind: 'http'
+      workerAvailabilityTimeoutMilliseconds: 10000
+      attributes:
+        maxRequestBodySize: 67108864  # 64MB
+
+  # No GPU resources needed - this is just a proxy
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 3
+      mountMode: volume
