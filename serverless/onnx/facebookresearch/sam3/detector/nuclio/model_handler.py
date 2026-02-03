@@ -116,6 +116,11 @@ def get_model_paths(model_dir: Optional[str] = None) -> Dict[str, str]:
         "text_encoder": os.environ.get("SAM3_TEXT_ENCODER", f"{base_dir}/text_encoder.onnx"),
         "pcs_decoder": os.environ.get("SAM3_PCS_DECODER", f"{base_dir}/pcs_decoder.onnx"),
         "tracker_decoder": os.environ.get("SAM3_TRACKER_DECODER", f"{base_dir}/tracker_decoder.onnx"),
+        # Memory components for video propagation (server-side only)
+        "memory_attention": os.environ.get("SAM3_MEMORY_ATTENTION", f"{base_dir}/memory_attention.onnx"),
+        "memory_encoder": os.environ.get("SAM3_MEMORY_ENCODER", f"{base_dir}/memory_encoder.onnx"),
+        "object_pointer": os.environ.get("SAM3_OBJECT_POINTER", f"{base_dir}/object_pointer.onnx"),
+        "temporal_pos_enc": os.environ.get("SAM3_TEMPORAL_POS_ENC", f"{base_dir}/temporal_pos_enc.npy"),
     }
 
 
@@ -222,6 +227,11 @@ class UnifiedModelHandler:
         self._text_encoder: Optional[ort.InferenceSession] = None
         self._pcs_decoder: Optional[ort.InferenceSession] = None
         self._tracker_decoder: Optional[ort.InferenceSession] = None
+        # Memory components for video propagation
+        self._memory_attention: Optional[ort.InferenceSession] = None
+        self._memory_encoder: Optional[ort.InferenceSession] = None
+        self._object_pointer: Optional[ort.InferenceSession] = None
+        self._temporal_pos_enc: Optional[np.ndarray] = None  # Pre-computed numpy array
 
         # Image preprocessing params
         self.image_size = SAM3_IMAGE_SIZE
@@ -309,6 +319,73 @@ class UnifiedModelHandler:
                 providers=self.providers,
             )
         return self._tracker_decoder
+
+    def _get_memory_attention(self):
+        """Lazy load memory attention ONNX model for video propagation."""
+        if self._memory_attention is None:
+            import onnxruntime as ort
+            path = self.paths["memory_attention"]
+            if not os.path.exists(path):
+                raise FileNotFoundError(
+                    f"Memory attention model not found: {path}\n"
+                    "Run export_sam3_memory_components.py to generate it."
+                )
+            logger.info(f"Loading memory attention: {path}")
+            self._memory_attention = ort.InferenceSession(
+                path,
+                sess_options=self.sess_options,
+                providers=self.providers,
+            )
+        return self._memory_attention
+
+    def _get_memory_encoder(self):
+        """Lazy load memory encoder ONNX model for video propagation."""
+        if self._memory_encoder is None:
+            import onnxruntime as ort
+            path = self.paths["memory_encoder"]
+            if not os.path.exists(path):
+                raise FileNotFoundError(
+                    f"Memory encoder model not found: {path}\n"
+                    "Run export_sam3_memory_components.py to generate it."
+                )
+            logger.info(f"Loading memory encoder: {path}")
+            self._memory_encoder = ort.InferenceSession(
+                path,
+                sess_options=self.sess_options,
+                providers=self.providers,
+            )
+        return self._memory_encoder
+
+    def _get_object_pointer(self):
+        """Lazy load object pointer ONNX model for video propagation."""
+        if self._object_pointer is None:
+            import onnxruntime as ort
+            path = self.paths["object_pointer"]
+            if not os.path.exists(path):
+                raise FileNotFoundError(
+                    f"Object pointer model not found: {path}\n"
+                    "Run export_sam3_memory_components.py to generate it."
+                )
+            logger.info(f"Loading object pointer: {path}")
+            self._object_pointer = ort.InferenceSession(
+                path,
+                sess_options=self.sess_options,
+                providers=self.providers,
+            )
+        return self._object_pointer
+
+    def _get_temporal_pos_enc(self) -> np.ndarray:
+        """Load pre-computed temporal position encoding table."""
+        if self._temporal_pos_enc is None:
+            path = self.paths["temporal_pos_enc"]
+            if not os.path.exists(path):
+                raise FileNotFoundError(
+                    f"Temporal position encoding not found: {path}\n"
+                    "Run export_sam3_memory_components.py to generate it."
+                )
+            logger.info(f"Loading temporal position encoding: {path}")
+            self._temporal_pos_enc = np.load(path)
+        return self._temporal_pos_enc
 
     # =========================================================================
     # Image Preprocessing
@@ -1490,14 +1567,282 @@ class UnifiedModelHandler:
     def _track_with_memory(
         self,
         embeddings: Dict[str, np.ndarray],
-        prev_memory: Optional[np.ndarray],
+        prev_memory: Optional[Dict[str, np.ndarray]],
         prev_box: List[float],
         original_size: Tuple[int, int],
     ) -> Dict[str, Any]:
-        """Track object using memory from previous frame."""
-        # For now, use box prompt decoding
-        # Full video tracking would use memory bank cross-attention
-        return self._decode_box_prompt(embeddings, prev_box, original_size)
+        """
+        Track object using memory from previous frames.
+
+        This implements SAM3's video propagation pipeline:
+        1. Condition current frame features with memory (memory_attention)
+        2. Decode mask using conditioned features (tracker_decoder)
+        3. Encode new mask into memory (memory_encoder)
+        4. Extract object pointer (object_pointer)
+
+        Args:
+            embeddings: Current frame embeddings from vision encoder
+            prev_memory: Memory state from previous frames containing:
+                - memory_bank: [B, num_frames*seq, 64] accumulated memory features
+                - memory_pos_bank: [B, num_frames*seq, 64] accumulated position encodings
+                - object_pointer: [B, 256] object representation
+                - frame_count: number of frames in memory
+            prev_box: Previous frame bounding box [x1, y1, x2, y2]
+            original_size: Original image size (width, height)
+
+        Returns:
+            Dict with mask, box, score, and updated memory state
+        """
+        # Check if memory components are available
+        try:
+            mem_attn = self._get_memory_attention()
+            mem_enc = self._get_memory_encoder()
+            obj_ptr = self._get_object_pointer()
+            temporal_pos = self._get_temporal_pos_enc()
+        except FileNotFoundError as e:
+            logger.warning(f"Memory components not available: {e}")
+            # Fall back to box-only tracking
+            return self._decode_box_prompt(embeddings, prev_box, original_size)
+
+        # Get FPN features
+        fpn_feat_0 = embeddings.get("fpn_feat_0")  # [1, 256, 288, 288]
+        fpn_feat_1 = embeddings.get("fpn_feat_1")  # [1, 256, 144, 144]
+        fpn_feat_2 = embeddings.get("fpn_feat_2")  # [1, 256, 72, 72]
+
+        if fpn_feat_0 is None or fpn_feat_1 is None or fpn_feat_2 is None:
+            logger.error("Missing FPN features in embeddings")
+            return self._decode_box_prompt(embeddings, prev_box, original_size)
+
+        # Get spatial dimensions
+        H, W = fpn_feat_2.shape[2], fpn_feat_2.shape[3]  # 72, 72
+        seq_len = H * W  # 5184
+
+        # Prepare current frame features for memory attention
+        # Flatten spatial dims: [B, 256, H, W] -> [B, H*W, 256]
+        current_features = fpn_feat_2.transpose(0, 2, 3, 1).reshape(1, seq_len, 256)
+
+        # Generate position encoding for current frame (2D sine/cosine)
+        current_pos_enc = self._generate_2d_pos_enc(H, W, dim=256)  # [1, seq_len, 256]
+
+        # If no previous memory, use box prompt only for first frame
+        if prev_memory is None or prev_memory.get("frame_count", 0) == 0:
+            result = self._decode_box_prompt(embeddings, prev_box, original_size)
+
+            # Initialize memory from first frame mask
+            if result.get("mask") is not None:
+                memory = self._encode_mask_to_memory(
+                    fpn_feat_2, result["mask"], original_size, H, W, mem_enc
+                )
+                # Get object pointer from decoder output (if available)
+                obj_pointer = np.zeros((1, 256), dtype=np.float32)
+
+                result["memory"] = {
+                    "memory_bank": memory["features"].reshape(1, seq_len, 64),
+                    "memory_pos_bank": memory["pos_enc"].reshape(1, seq_len, 64),
+                    "object_pointer": obj_pointer,
+                    "frame_count": 1,
+                }
+            return result
+
+        # Run memory attention to condition current features
+        memory_bank = prev_memory["memory_bank"]  # [1, num_frames*seq, 64]
+        memory_pos_bank = prev_memory["memory_pos_bank"]  # [1, num_frames*seq, 64]
+
+        # Add temporal position encoding to memory
+        frame_count = prev_memory.get("frame_count", 1)
+        memory_with_temporal = self._add_temporal_pos_enc(
+            memory_bank, temporal_pos, frame_count, seq_len
+        )
+
+        # Run memory attention
+        try:
+            conditioned_features = mem_attn.run(
+                None,
+                {
+                    "current_vision_features": current_features.astype(np.float32),
+                    "memory": memory_with_temporal.astype(np.float32),
+                    "current_vision_pos_enc": current_pos_enc.astype(np.float32),
+                    "memory_pos_enc": memory_pos_bank.astype(np.float32),
+                }
+            )[0]  # [1, seq_len, 256]
+        except Exception as e:
+            logger.error(f"Memory attention failed: {e}")
+            return self._decode_box_prompt(embeddings, prev_box, original_size)
+
+        # Reshape back to spatial format for decoder
+        # [1, seq_len, 256] -> [1, 256, H, W]
+        conditioned_fpn_2 = conditioned_features.transpose(0, 2, 1).reshape(1, 256, H, W)
+
+        # Run decoder with conditioned features
+        decoder = self._get_tracker_decoder()
+
+        # Use center of previous box as prompt
+        orig_w, orig_h = original_size
+        scale_x = SAM3_IMAGE_SIZE / orig_w
+        scale_y = SAM3_IMAGE_SIZE / orig_h
+
+        center_x = (prev_box[0] + prev_box[2]) / 2 * scale_x
+        center_y = (prev_box[1] + prev_box[3]) / 2 * scale_y
+
+        point_coords = np.array([[[[center_x, center_y]]]], dtype=np.float32)
+        point_labels = np.array([[[1.0]]], dtype=np.float32)
+
+        try:
+            outputs = decoder.run(
+                None,
+                {
+                    "fpn_feat_0": fpn_feat_0.astype(np.float32),
+                    "fpn_feat_1": fpn_feat_1.astype(np.float32),
+                    "fpn_feat_2": conditioned_fpn_2.astype(np.float32),  # Use conditioned features
+                    "point_coords": point_coords,
+                    "point_labels": point_labels,
+                    "mask_input": np.zeros((1, 1, 288, 288), dtype=np.float32),
+                    "has_mask_input": np.array([0.0], dtype=np.float32),
+                }
+            )
+
+            # Parse outputs
+            pred_masks = outputs[0]  # [1, 1, H, W]
+            iou_scores = outputs[1] if len(outputs) > 1 else np.array([[1.0]])
+
+            # Get best mask
+            mask_idx = np.argmax(iou_scores)
+            mask = pred_masks[0, mask_idx]
+            score = float(iou_scores[0, mask_idx])
+
+            # Resize mask to original size
+            mask_resized = self._resize_mask(mask, original_size)
+
+            # Convert to binary and get bounding box
+            binary_mask = (mask_resized > 0).astype(np.uint8)
+            new_box = self._mask_to_box(binary_mask) or prev_box
+
+        except Exception as e:
+            logger.error(f"Decoder with memory failed: {e}")
+            return self._decode_box_prompt(embeddings, prev_box, original_size)
+
+        # Encode new mask into memory
+        new_memory_feat = self._encode_mask_to_memory(
+            conditioned_fpn_2, mask_resized, original_size, H, W, mem_enc
+        )
+
+        # Update memory bank (keep last N frames, FIFO)
+        max_memory_frames = 7  # SAM3 default
+        if frame_count >= max_memory_frames:
+            # Remove oldest frame
+            memory_bank = memory_bank[:, seq_len:, :]
+            memory_pos_bank = memory_pos_bank[:, seq_len:, :]
+
+        # Append new memory
+        new_memory_flat = new_memory_feat["features"].reshape(1, seq_len, 64)
+        new_pos_flat = new_memory_feat["pos_enc"].reshape(1, seq_len, 64)
+
+        updated_memory_bank = np.concatenate([memory_bank, new_memory_flat], axis=1)
+        updated_pos_bank = np.concatenate([memory_pos_bank, new_pos_flat], axis=1)
+
+        return {
+            "mask": mask_resized,
+            "box": new_box,
+            "score": score,
+            "memory": {
+                "memory_bank": updated_memory_bank,
+                "memory_pos_bank": updated_pos_bank,
+                "object_pointer": prev_memory.get("object_pointer", np.zeros((1, 256))),
+                "frame_count": min(frame_count + 1, max_memory_frames),
+            },
+        }
+
+    def _generate_2d_pos_enc(self, h: int, w: int, dim: int = 256) -> np.ndarray:
+        """Generate 2D sinusoidal position encoding."""
+        y_pos = np.arange(h).reshape(-1, 1).repeat(w, axis=1)
+        x_pos = np.arange(w).reshape(1, -1).repeat(h, axis=0)
+
+        pos_enc = np.zeros((h, w, dim), dtype=np.float32)
+
+        div_term = np.exp(np.arange(0, dim // 2, 2) * -(np.log(10000.0) / (dim // 2)))
+
+        pos_enc[:, :, 0::4] = np.sin(x_pos[:, :, np.newaxis] * div_term)
+        pos_enc[:, :, 1::4] = np.cos(x_pos[:, :, np.newaxis] * div_term)
+        pos_enc[:, :, 2::4] = np.sin(y_pos[:, :, np.newaxis] * div_term)
+        pos_enc[:, :, 3::4] = np.cos(y_pos[:, :, np.newaxis] * div_term)
+
+        return pos_enc.reshape(1, h * w, dim)
+
+    def _add_temporal_pos_enc(
+        self,
+        memory_bank: np.ndarray,
+        temporal_pos: np.ndarray,
+        frame_count: int,
+        seq_len: int,
+    ) -> np.ndarray:
+        """Add temporal position encoding to memory bank."""
+        # temporal_pos shape: [max_frames, 64]
+        # memory_bank shape: [1, frame_count * seq_len, 64]
+
+        result = memory_bank.copy()
+
+        for i in range(frame_count):
+            start_idx = i * seq_len
+            end_idx = (i + 1) * seq_len
+            if i < len(temporal_pos):
+                result[0, start_idx:end_idx, :] += temporal_pos[i:i+1, :]
+
+        return result
+
+    def _encode_mask_to_memory(
+        self,
+        fpn_feat: np.ndarray,
+        mask: np.ndarray,
+        original_size: Tuple[int, int],
+        h: int,
+        w: int,
+        mem_enc,
+    ) -> Dict[str, np.ndarray]:
+        """Encode mask into memory representation."""
+        # Resize mask to memory encoder expected size
+        mask_h = h * 16  # 1152
+        mask_w = w * 16  # 1152
+
+        # Resize mask from original size to expected size
+        from PIL import Image
+        mask_img = Image.fromarray((mask > 0).astype(np.uint8) * 255)
+        mask_resized = np.array(mask_img.resize((mask_w, mask_h), Image.NEAREST)) / 255.0
+        mask_input = mask_resized[np.newaxis, np.newaxis, :, :].astype(np.float32)
+
+        try:
+            outputs = mem_enc.run(
+                None,
+                {
+                    "vision_features": fpn_feat.astype(np.float32),
+                    "masks": mask_input,
+                }
+            )
+            return {
+                "features": outputs[0],  # [1, 64, H, W]
+                "pos_enc": outputs[1],   # [1, 64, H, W]
+            }
+        except Exception as e:
+            logger.error(f"Memory encoder failed: {e}")
+            return {
+                "features": np.zeros((1, 64, h, w), dtype=np.float32),
+                "pos_enc": np.zeros((1, 64, h, w), dtype=np.float32),
+            }
+
+    def _resize_mask(self, mask: np.ndarray, target_size: Tuple[int, int]) -> np.ndarray:
+        """Resize mask to target size using PIL."""
+        from PIL import Image
+        mask_img = Image.fromarray(mask.astype(np.float32))
+        resized = mask_img.resize(target_size, Image.BILINEAR)
+        return np.array(resized)
+
+    def _mask_to_box(self, binary_mask: np.ndarray) -> Optional[List[float]]:
+        """Extract bounding box from binary mask."""
+        coords = np.argwhere(binary_mask > 0)
+        if len(coords) == 0:
+            return None
+        y_min, x_min = coords.min(axis=0)
+        y_max, x_max = coords.max(axis=0)
+        return [float(x_min), float(y_min), float(x_max), float(y_max)]
 
     def clear_tracking(self, session_id: str) -> Dict[str, Any]:
         """Clear a tracking session."""
@@ -1528,11 +1873,23 @@ class UnifiedModelHandler:
         if has_vision and has_text and has_pcs and has_tracker:
             capabilities.append("init_tracking_from_text")  # Video PCS
 
+        # Check memory components for enhanced video propagation
+        has_memory_attention = os.path.exists(self.paths["memory_attention"])
+        has_memory_encoder = os.path.exists(self.paths["memory_encoder"])
+        has_object_pointer = os.path.exists(self.paths["object_pointer"])
+        has_memory_components = has_memory_attention and has_memory_encoder and has_object_pointer
+
+        if has_memory_components:
+            capabilities.append("video_propagation")  # Full memory-based tracking
+
         return {
             "vision_encoder": has_vision,
             "text_encoder": has_text,
             "pcs_decoder": has_pcs,
             "tracker_decoder": has_tracker,
+            "memory_attention": has_memory_attention,
+            "memory_encoder": has_memory_encoder,
+            "object_pointer": has_object_pointer,
             "model_dir": self.paths["model_dir"],
             "device": self.device,
             "capabilities": capabilities,
@@ -1543,6 +1900,7 @@ class UnifiedModelHandler:
                 "automatic_mask_generation": has_tracker,  # AMG
                 "semantic_segmentation": has_pcs,  # get_semantic_mask
                 "video_pcs": has_vision and has_text and has_pcs and has_tracker,
+                "memory_propagation": has_memory_components,  # Memory-based video propagation
             },
         }
 
