@@ -175,9 +175,15 @@ function prepareDecoderInputs(
         input_points: new Tensor('float32', pointCoords, [1, 1, numPoints, 2]),
         input_labels: new Tensor('float32', pointLabels, [1, 1, numPoints]),
         input_boxes: new Tensor('float32', boxCoords, [1, numBoxes, 4]),
+        // Legacy decoder names (32/64/256ch usls export)
         'image_embeddings.0': emb0Tensor,
         'image_embeddings.1': emb1Tensor,
         'image_embeddings.2': emb2Tensor,
+        // Unified decoder names (256ch HuggingFace export)
+        // Worker will use whichever the decoder supports
+        fpn_feat_0: emb0Tensor,
+        fpn_feat_1: emb1Tensor,
+        fpn_feat_2: emb2Tensor,
         // Mask refinement inputs (optional)
         mask_input: maskInput,
         has_mask_input: hasMaskInput,
@@ -461,17 +467,21 @@ const sam3Plugin: SAM3Plugin = {
         core: null,
         worker: new Worker(new URL('./inference.worker', import.meta.url)),
         jobs: {},
-        modelID: 'pth-facebookresearch-sam3-tracker',
-        // Use decoder with mask refinement support (like SAM2)
-        modelURL: '/assets/tracker-prompt-encoder-mask-decoder-with-mask-input.onnx',
+        // Use ONNX detector function (main function with all models)
+        // The detector deploys first alphabetically, ensuring it's always ready
+        // Interactor mode is handled via interactor-proxy, but plugin calls detector directly
+        modelID: 'onnx-facebookresearch-sam3-detector',
+        // Decoder matching the vision encoder from export_hf_onnx.py
+        // Supports 256ch inputs and mask refinement
+        modelURL: '/assets/tracker_decoder.onnx',
         emb0Cache: new LRUCache({
-            // [1, 32, 288, 288] float32 = ~38 MB per frame, max 8 frames = ~300 MB
+            // [1, 256, 288, 288] float32 = ~75 MB per frame, max 8 frames = ~600 MB
             max: 8,
             updateAgeOnGet: true,
             updateAgeOnHas: true,
         }),
         emb1Cache: new LRUCache({
-            // [1, 64, 144, 144] float32 = ~5.3 MB per frame
+            // [1, 256, 144, 144] float32 = ~19 MB per frame
             max: 8,
             updateAgeOnGet: true,
             updateAgeOnHas: true,
@@ -563,22 +573,26 @@ function resizeMaskWithBbox(
     dstH: number,
 ): { mask: number[][]; bounds: [number, number, number, number] } {
     // ========================================================================
-    // STEP 1: Fill holes on LOW-RES LOGITS (matching official SAM3)
+    // STEP 1: Post-process LOW-RES LOGITS (matching official SAM3)
     // ========================================================================
-    // Official SAM3 fills holes BEFORE upsampling, operating on the 288x288 logits.
+    // Official SAM3 post-processes masks BEFORE upsampling, on 288x288 logits.
     // From sam3/model/utils/sam1_utils.py:
-    //   is_hole = (labels > 0) & (areas <= self.max_hole_area)
-    //   masks = torch.where(is_hole, self.mask_threshold + 10.0, masks)
+    //   - Fill holes: small background components → set to +10.0
+    //   - Remove sprinkles: small foreground components → set to -10.0
     //
-    // The max_hole_area=256 refers to pixels at 288x288, NOT at full resolution.
-    // We use a mutable copy to modify logits before upsampling.
+    // Official SAM3 defaults (sam1_utils.py SAM2Transforms):
+    //   - max_hole_area=0, max_sprinkle_area=0 for image mode (DISABLED)
+    //
+    // We match the official defaults: no post-processing for interactive annotation.
+    // Set maxHoleArea/maxSprinkleArea > 0 if you want to enable this.
     const logitsCopy = new Float32Array(maskLogits.length);
     for (let i = 0; i < maskLogits.length; i++) {
         logitsCopy[i] = maskLogits[i] as number;
     }
 
-    // Fill holes in low-res mask (256 pixels at 288x288)
-    fillHolesOnLogits(logitsCopy, srcW, srcH, 256);
+    // Match official SAM3 image mode: no hole filling or sprinkle removal
+    // To enable, change these values (e.g., 8 for both as used in some video configs)
+    fillHolesAndRemoveSprinkles(logitsCopy, srcW, srcH, 0, 0);
 
     // ========================================================================
     // STEP 2: Find bounding box on low-res mask (fast - only 288x288 pixels)
@@ -665,123 +679,168 @@ function resizeMaskWithBbox(
 }
 
 /**
- * Fill small interior holes in a LOGIT mask (before thresholding/upsampling).
+ * Fill small holes and remove small sprinkles in a LOGIT mask (before upsampling).
  *
- * This matches the official SAM3 implementation from sam3/model/utils/sam1_utils.py:
+ * This EXACTLY matches the official SAM3 implementation from sam3/model/utils/sam1_utils.py:
+ *
+ * For hole filling (max_hole_area > 0):
  * ```python
  * labels, areas = connected_components((mask_flat <= self.mask_threshold).to(torch.uint8))
  * is_hole = (labels > 0) & (areas <= self.max_hole_area)
  * masks = torch.where(is_hole, self.mask_threshold + 10.0, masks)
  * ```
  *
- * CRITICAL: Official SAM3 fills holes at LOW-RES (288x288) BEFORE upsampling.
- * The max_hole_area=256 refers to pixels at 288x288, not at full resolution.
- * This ensures small holes at the source resolution are filled properly.
+ * For sprinkle removal (max_sprinkle_area > 0):
+ * ```python
+ * labels, areas = connected_components((mask_flat > self.mask_threshold).to(torch.uint8))
+ * is_hole = (labels > 0) & (areas <= self.max_sprinkle_area)
+ * masks = torch.where(is_hole, self.mask_threshold - 10.0, masks)
+ * ```
  *
- * Algorithm:
- * 1. Find all connected components of background pixels (logit <= 0)
- * 2. Mark components that touch the image border as "exterior" (not holes)
- * 3. For interior components (holes), if area <= maxHoleArea, set logit = +10.0
+ * Key insight: `labels > 0` means ANY connected component except the largest one (label 0).
+ * This is different from checking if a component touches the border.
+ *
+ * Official SAM3 defaults:
+ *   - max_hole_area=0, max_sprinkle_area=0 for image mode (no post-processing)
+ *   - max_hole_area=8, max_sprinkle_area=8 used in some video configs
  *
  * @param logits - Float32Array of mask logits (modified in place)
  * @param width - mask width
  * @param height - mask height
- * @param maxHoleArea - maximum hole area to fill (default 256, matching SAM3)
+ * @param maxHoleArea - maximum hole area to fill (0 = disabled)
+ * @param maxSprinkleArea - maximum sprinkle area to remove (0 = disabled)
  */
-function fillHolesOnLogits(logits: Float32Array, width: number, height: number, maxHoleArea: number = 256): void {
-    if (width <= 2 || height <= 2) return;  // Too small for holes
+function fillHolesAndRemoveSprinkles(
+    logits: Float32Array,
+    width: number,
+    height: number,
+    maxHoleArea: number = 0,
+    maxSprinkleArea: number = 0,
+): void {
+    if (width <= 2 || height <= 2) return;
+    if (maxHoleArea <= 0 && maxSprinkleArea <= 0) return;  // Nothing to do
 
-    // Connected component labeling using union-find
-    const labels = new Int32Array(width * height);
-    const parent = new Int32Array(width * height);
-    const rank = new Int32Array(width * height);
+    const size = width * height;
 
-    // Initialize: each pixel is its own component (or -1 for foreground)
-    for (let i = 0; i < width * height; i++) {
-        parent[i] = i;
-        labels[i] = -1;  // -1 means foreground or unlabeled
-    }
+    // Helper: Connected component labeling using union-find
+    const findComponents = (isForeground: (idx: number) => boolean): { labels: Int32Array; areas: Int32Array } => {
+        const parent = new Int32Array(size);
+        const rank = new Int32Array(size);
 
-    // Union-Find: find with path compression
-    const find = (x: number): number => {
-        if (parent[x] !== x) {
-            parent[x] = find(parent[x]);
+        // Initialize
+        for (let i = 0; i < size; i++) {
+            parent[i] = i;
         }
-        return parent[x];
-    };
 
-    // Union-Find: union by rank
-    const union = (x: number, y: number): void => {
-        const rootX = find(x);
-        const rootY = find(y);
-        if (rootX === rootY) return;
-
-        if (rank[rootX] < rank[rootY]) {
-            parent[rootX] = rootY;
-        } else if (rank[rootX] > rank[rootY]) {
-            parent[rootY] = rootX;
-        } else {
-            parent[rootY] = rootX;
-            rank[rootX]++;
-        }
-    };
-
-    // First pass: label background pixels (logit <= 0) and union with neighbors
-    for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-            const idx = y * width + x;
-            if (logits[idx] > 0) continue;  // Skip foreground
-
-            labels[idx] = idx;  // Mark as background (will be resolved to root later)
-
-            // Union with left neighbor
-            if (x > 0 && logits[idx - 1] <= 0) {
-                union(idx, idx - 1);
+        // Find with path compression
+        const find = (x: number): number => {
+            if (parent[x] !== x) {
+                parent[x] = find(parent[x]);
             }
-            // Union with top neighbor
-            if (y > 0 && logits[idx - width] <= 0) {
-                union(idx, idx - width);
+            return parent[x];
+        };
+
+        // Union by rank
+        const union = (x: number, y: number): void => {
+            const rootX = find(x);
+            const rootY = find(y);
+            if (rootX === rootY) return;
+            if (rank[rootX] < rank[rootY]) {
+                parent[rootX] = rootY;
+            } else if (rank[rootX] > rank[rootY]) {
+                parent[rootY] = rootX;
+            } else {
+                parent[rootY] = rootX;
+                rank[rootX]++;
+            }
+        };
+
+        // First pass: union adjacent pixels of the same class
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const idx = y * width + x;
+                if (!isForeground(idx)) continue;
+
+                // Union with left neighbor
+                if (x > 0 && isForeground(idx - 1)) {
+                    union(idx, idx - 1);
+                }
+                // Union with top neighbor
+                if (y > 0 && isForeground(idx - width)) {
+                    union(idx, idx - width);
+                }
             }
         }
-    }
 
-    // Second pass: flatten labels to roots and compute component properties
-    const componentArea = new Map<number, number>();
-    const componentTouchesBorder = new Map<number, boolean>();
+        // Second pass: compute component areas
+        const componentArea = new Map<number, number>();
+        const labels = new Int32Array(size);
 
-    for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-            const idx = y * width + x;
-            if (labels[idx] === -1) continue;  // Skip foreground
-
-            const root = find(idx);
-            labels[idx] = root;
-
-            // Accumulate area
+        for (let i = 0; i < size; i++) {
+            if (!isForeground(i)) {
+                labels[i] = -1;  // Not part of any component
+                continue;
+            }
+            const root = find(i);
+            labels[i] = root;
             componentArea.set(root, (componentArea.get(root) || 0) + 1);
+        }
 
-            // Check if this pixel touches the border
-            if (x === 0 || x === width - 1 || y === 0 || y === height - 1) {
-                componentTouchesBorder.set(root, true);
+        // Find the largest component (this becomes "label 0" conceptually)
+        let largestRoot = -1;
+        let largestArea = 0;
+        for (const [root, area] of componentArea) {
+            if (area > largestArea) {
+                largestArea = area;
+                largestRoot = root;
+            }
+        }
+
+        // Convert to dense labels (largest = 0, others = 1, 2, 3, ...)
+        const rootToLabel = new Map<number, number>();
+        let nextLabel = 1;
+        rootToLabel.set(largestRoot, 0);  // Largest component gets label 0
+
+        const finalLabels = new Int32Array(size);
+        const areas = new Int32Array(size);
+
+        for (let i = 0; i < size; i++) {
+            if (labels[i] === -1) {
+                finalLabels[i] = -1;
+                areas[i] = 0;
+                continue;
+            }
+            const root = labels[i];
+            if (!rootToLabel.has(root)) {
+                rootToLabel.set(root, nextLabel++);
+            }
+            finalLabels[i] = rootToLabel.get(root)!;
+            areas[i] = componentArea.get(root) || 0;
+        }
+
+        return { labels: finalLabels, areas };
+    };
+
+    // Fill holes: small background components (mask <= 0)
+    if (maxHoleArea > 0) {
+        const { labels, areas } = findComponents((idx) => logits[idx] <= 0);
+        for (let i = 0; i < size; i++) {
+            // labels > 0 means it's NOT the largest background component
+            // This matches: is_hole = (labels > 0) & (areas <= self.max_hole_area)
+            if (labels[i] > 0 && areas[i] <= maxHoleArea) {
+                logits[i] = 10.0;  // mask_threshold + 10.0 = 0 + 10 = 10
             }
         }
     }
 
-    // Third pass: fill holes by setting logit = +10.0 (matching official SAM3)
-    // Only fill interior holes (not touching border) with area <= maxHoleArea
-    for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-            const idx = y * width + x;
-            const root = labels[idx];
-            if (root === -1) continue;  // Skip foreground
-
-            const touchesBorder = componentTouchesBorder.get(root) || false;
-            const area = componentArea.get(root) || 0;
-
-            // Fill only interior holes with area <= maxHoleArea
-            if (!touchesBorder && area <= maxHoleArea) {
-                // Official SAM3 sets logit to mask_threshold + 10.0 = 0 + 10 = 10
-                logits[idx] = 10.0;
+    // Remove sprinkles: small foreground components (mask > 0)
+    if (maxSprinkleArea > 0) {
+        const { labels, areas } = findComponents((idx) => logits[idx] > 0);
+        for (let i = 0; i < size; i++) {
+            // labels > 0 means it's NOT the largest foreground component
+            // This matches: is_hole = (labels > 0) & (areas <= self.max_sprinkle_area)
+            if (labels[i] > 0 && areas[i] <= maxSprinkleArea) {
+                logits[i] = -10.0;  // mask_threshold - 10.0 = 0 - 10 = -10
             }
         }
     }

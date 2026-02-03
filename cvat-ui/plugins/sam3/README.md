@@ -7,7 +7,7 @@ Interactive segmentation using Segment Anything 3 (SAM3-Tracker) with encoder/de
 Similar to SAM2, this plugin uses a two-stage architecture:
 
 1. **Server-side Vision Encoder** (Nuclio function)
-   - Runs on GPU server
+   - Runs on GPU server using ONNX Runtime
    - Processes entire image once per frame
    - Returns image embeddings (cached for subsequent clicks)
 
@@ -18,36 +18,21 @@ Similar to SAM2, this plugin uses a two-stage architecture:
 
 ## Prerequisites
 
-### 1. Download ONNX Models
+### 1. ONNX Models
 
-**Vision Encoder** (for Nuclio function):
+The plugin requires pre-exported ONNX models. These are exported using `export_hf_onnx.py`
+(requires HuggingFace authentication at export time, but NOT at runtime).
 
-The encoder is downloaded automatically by `function-gpu.yaml` from HuggingFace. For manual download:
-```bash
-cd serverless/pytorch/facebookresearch/sam3/nuclio
-# Full precision (~1.8GB)
-curl -L -o tracker-vision-encoder.onnx \
-  "https://huggingface.co/onnx-community/sam3-tracker-ONNX/resolve/main/onnx/vision_encoder.onnx"
-curl -L -o tracker-vision-encoder.onnx_data \
-  "https://huggingface.co/onnx-community/sam3-tracker-ONNX/resolve/main/onnx/vision_encoder.onnx_data"
-```
+**Server-side models** (deployed with Nuclio):
+- `vision_encoder.onnx` (~1.8GB) - Vision transformer encoder
+- `text_encoder.onnx` (~600MB) - CLIP text encoder for PCS mode
+- `pcs_decoder.onnx` (~150MB) - Promptable Cascade Segmentation decoder
+- `tracker_decoder.onnx` (~22MB) - Point-based tracker decoder
 
-**Prompt Decoder** (for browser):
+**Browser-side decoder** (in `cvat-ui/plugins/sam3/assets/`):
+- `tracker_decoder.onnx` (22MB) - Decoder with mask refinement support (from export_hf_onnx.py)
 
-The recommended decoder is the custom export with mask refinement support (see "Mask Refinement Support" section below for how to generate it):
-- `tracker-prompt-encoder-mask-decoder-with-mask-input.onnx` (17MB, full precision, mask refinement) **default**
-
-Alternatively, you can download pre-built decoders from usls (without mask refinement):
-```bash
-cd cvat-ui/plugins/sam3/assets
-curl -L -o tracker-prompt-encoder-mask-decoder.onnx \
-  "https://github.com/jamjamjon/assets/releases/download/sam3/tracker-prompt-encoder-mask-decoder.onnx"
-```
-
-Usls decoder variants (no mask refinement):
-- `tracker-prompt-encoder-mask-decoder.onnx` (21MB, full precision)
-- `tracker-prompt-encoder-mask-decoder-q8.onnx` (10MB, int8 quantized)
-- `tracker-prompt-encoder-mask-decoder-q4f16.onnx` (5MB, 4-bit quantized)
+The unified decoder accepts 256-channel FPN features at all levels (matching the HuggingFace export).
 
 ### 2. Enable the Plugin
 
@@ -64,11 +49,31 @@ const defaultPlugins = ['plugins/sam', 'plugins/sam2', 'plugins/sam3'];
 
 ### 3. Deploy the Nuclio Function
 
+Deploy the ONNX unified function (supports interactor + detector modes):
+
 ```bash
 cd serverless
+
+# GPU version (recommended)
 nuctl deploy --project-name cvat \
-  pytorch/facebookresearch/sam3/nuclio \
-  --platform local
+  onnx/facebookresearch/sam3-unified/nuclio \
+  --platform local \
+  --build-code-entry-type sourceCode
+
+# Or CPU version (slower but no CUDA required)
+nuctl deploy --project-name cvat \
+  onnx/facebookresearch/sam3-unified/nuclio \
+  --platform local \
+  --build-code-entry-type sourceCode \
+  --config-file function.yaml
+```
+
+For text-to-segment (detector) mode, deploy with the detector YAML:
+```bash
+nuctl deploy --project-name cvat \
+  onnx/facebookresearch/sam3-unified/nuclio \
+  --platform local \
+  --config-file function-gpu-detector.yaml
 ```
 
 ## Model Details
@@ -78,94 +83,66 @@ nuctl deploy --project-name cvat \
 | Feature | SAM2 | SAM3-Tracker |
 |---------|------|--------------|
 | Input resolution | 1024×1024 | 1008×1008 |
-| Encoder outputs | 3 tensors | 3 tensors (image_embeddings.0/1/2) |
-| Decoder size | ~16MB | ~21MB (full precision) |
-| Mask refinement | ✅ Supported | ✅ Supported (custom export required) |
+| Encoder channels | 32/64/256 | 256/256/256 (unified) |
+| Decoder size | ~16MB | ~22MB (unified) |
+| Mask refinement | ✅ Supported | ✅ Supported |
+| Text prompts | ❌ | ✅ (PCS mode) |
 
-### Tensor Shapes
+### Tensor Shapes (Unified Format)
 
 **Encoder outputs:**
-- `image_embeddings.0`: [1, 32, 288, 288]
-- `image_embeddings.1`: [1, 64, 144, 144]
-- `image_embeddings.2`: [1, 256, 72, 72]
+- `fpn_feat_0`: [1, 256, 288, 288] (high-res features)
+- `fpn_feat_1`: [1, 256, 144, 144] (mid-res features)
+- `fpn_feat_2`: [1, 256, 72, 72] (low-res features)
+- `fpn_pos_2`: [1, 256, 72, 72] (positional encoding)
 
 **Decoder inputs:**
-- `input_points`: [B, 1, N, 2]
-- `input_labels`: [B, 1, N]
-- `input_boxes`: [B, M, 4]
-- `image_embeddings.0`, `image_embeddings.1`, `image_embeddings.2`: from encoder
+- `fpn_feat_0/1/2`: from encoder
+- `point_coords`: [B, num_objects, num_points, 2]
+- `point_labels`: [B, num_objects, num_points]
+- `mask_input`: [B, 1, 288, 288] (optional, for refinement)
+- `has_mask_input`: [B] (float, 1.0 if mask_input valid)
 
 **Decoder outputs:**
-- `pred_masks`: [B, 1, 3, H, W] (3 mask predictions)
-- `iou_scores`: [B, 1, 3]
-- `object_score_logits`: [B, 1, 1]
+- `masks`: [B, 3, 1008, 1008] (3 mask predictions)
+- `iou_predictions`: [B, 3]
+- `low_res_masks`: [B, 3, 288, 288]
+- `object_score_logits`: [B, 1]
 
-## Mask Refinement Support
+## Mask Refinement
 
-### Overview
-
-Like SAM2, this plugin now supports **iterative mask refinement** - feeding the previous mask prediction back to the decoder to improve results with each click. This requires using a custom decoder export.
-
-### Standard vs Custom Decoder
-
-| Decoder | Mask Refinement | Notes |
-|---------|-----------------|-------|
-| `tracker-prompt-encoder-mask-decoder-with-mask-input.onnx` (custom) | ✅ Yes | **Default**, full SAM2 parity |
-| `tracker-prompt-encoder-mask-decoder.onnx` (usls) | ❌ No | No mask refinement |
-
-### Exporting the Custom Decoder
-
-The standard ONNX exports (both [usls](https://github.com/jamjamjon/usls) and [HuggingFace onnx-community](https://huggingface.co/onnx-community/sam3-tracker-ONNX)) do **not** include `mask_input` and `has_mask_input` inputs needed for refinement.
-
-To export a custom decoder with mask input support:
-
-```bash
-# Requires PyTorch 2.x and SAM3 dependencies
-cd serverless/pytorch/facebookresearch/sam3/nuclio
-pip install torch>=2.0 onnx onnxruntime
-pip install git+https://github.com/facebookresearch/sam3.git
-
-# Run the export script (auto-downloads pretrained weights from HuggingFace)
-python export_decoder_with_mask_input.py \
-  --checkpoint auto \
-  --output ../../../../../../cvat-ui/plugins/sam3/assets/tracker-prompt-encoder-mask-decoder-with-mask-input.onnx
-```
-
-### How It Works
+The unified decoder supports **iterative mask refinement** - feeding the previous mask prediction back to improve results with subsequent clicks:
 
 1. **First click**: Decoder uses zero mask (`has_mask_input=0`)
-2. **Subsequent clicks**: Previous low-res mask (288×288) is fed back as input
-3. This allows the model to refine predictions based on previous output
+2. **Subsequent clicks**: Previous low-res mask (288×288) is fed back
+3. The model refines predictions based on previous output + new clicks
 
-### Automatic Detection
+The plugin automatically detects if the decoder supports mask input:
+- If `mask_input` found in inputs → refinement enabled
+- Otherwise → single-pass inference (still functional)
 
-The plugin **automatically detects** whether the loaded decoder supports mask input:
-- If `mask_input` is found in model inputs → mask refinement enabled
-- Otherwise → standard single-pass inference (still works, just no refinement)
+## Operation Modes
 
-## Known Limitations
+### 1. Interactive (Interactor Mode)
 
-### No Official ONNX Export
+Standard point-and-click segmentation:
+- Click points → server encodes → browser decodes mask
+- Multiple positive/negative points supported
+- Box prompts supported
+- ~50-100ms per decode after first encode
 
-As of the time of writing, there is no official SAM3 ONNX export from Facebook Research.
-- See [facebookresearch/sam3#224](https://github.com/facebookresearch/sam3/issues/224) requesting official ONNX export scripts
-- This plugin uses community exports from [usls](https://github.com/jamjamjon/usls) or a custom export script
+### 2. PCS Detector (Text-to-Segment)
 
-### Standard Decoder Lacks Mask Refinement
-
-If using the standard usls/HuggingFace decoder (not the custom export):
-- Each click recalculates the mask from scratch using only point/box prompts
-- Multiple positive/negative clicks still work and improve results
-- Segmentation is fast (~50-100ms per click) since embeddings are cached
-
-**Solution:** Use the custom decoder export (see "Mask Refinement Support" above)
+Text-guided object detection and segmentation:
+- Enter text prompts describing objects to find
+- Server runs full PCS pipeline (CLIP encoding → memory search → cascade decoder)
+- Returns all matching masks in one shot
 
 ## Usage
 
-1. Select the "Segment Anything 3" interactor in CVAT
-2. Click on an object to segment
-3. Add positive points (left-click) or negative points (right-click) to refine
-4. Draw a bounding box for better initial segmentation
+1. In CVAT, select **"Segment Anything 3"** from the AI Tools
+2. For **interactive mode**: Click on objects to segment, right-click for negative points
+3. For **detector mode**: Enter text prompts (requires detector function deployed)
 
 ## Development
 
@@ -173,18 +150,28 @@ If using the standard usls/HuggingFace decoder (not the custom export):
 
 ```bash
 cd cvat-ui
-npm run build -- --env API_URL=/api
+CLIENT_PLUGINS="plugins/sam2:plugins/sam3" npm run build -- --env API_URL=/api
 ```
 
 ### Testing
 
 ```bash
-# Run the development server with SAM3 enabled
 CLIENT_PLUGINS="plugins/sam2:plugins/sam3" npm run start
 ```
+
+### Exporting Models
+
+The models are exported using the HuggingFace-based exporter:
+
+```bash
+cd serverless/onnx/facebookresearch/sam3-unified/nuclio
+python export_hf_onnx.py --output /path/to/export/dir
+```
+
+This creates all 4 ONNX models needed for full functionality.
 
 ## Acknowledgments
 
 - [Facebook Research SAM3](https://github.com/facebookresearch/sam3)
-- [onnx-community](https://huggingface.co/onnx-community/sam3-tracker-ONNX) - HuggingFace ONNX models (vision encoder)
+- [HuggingFace SAM3](https://huggingface.co/facebook/sam3.1-hiera-large)
 - [usls](https://github.com/jamjamjon/usls) - Alternative ONNX exports
