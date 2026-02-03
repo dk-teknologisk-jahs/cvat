@@ -51,9 +51,60 @@ REDIS_TTL = int(os.environ.get("REDIS_TTL", "3600"))  # 1 hour
 # Default model directory (can be overridden by environment or constructor)
 DEFAULT_MODEL_DIR = "/opt/nuclio/sam3/models"
 
+# GitHub release URL for pre-exported ONNX models
+DEFAULT_GITHUB_RELEASE_URL = "https://github.com/dk-teknologisk-jahs/cvat/releases/download/sam3"
+
 # Constants
 SAM3_IMAGE_SIZE = 1008
 DEFAULT_CONFIDENCE_THRESHOLD = 0.3
+
+
+def download_model_if_missing(model_path: str, model_name: str) -> bool:
+    """
+    Download a model from GitHub release if it doesn't exist.
+
+    Args:
+        model_path: Full path where model should be saved
+        model_name: Filename of the model (e.g., 'vision_encoder.onnx')
+
+    Returns:
+        True if model exists or was downloaded successfully
+    """
+    import urllib.request
+    from pathlib import Path
+
+    path = Path(model_path)
+    if path.exists() and path.stat().st_size > 1000:  # Basic sanity check
+        return True
+
+    github_url = os.environ.get("SAM3_GITHUB_RELEASE_URL", DEFAULT_GITHUB_RELEASE_URL)
+    url = f"{github_url}/{model_name}"
+
+    logger.info(f"Model not found: {model_path}")
+    logger.info(f"Downloading from: {url}")
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        def report_progress(block_num, block_size, total_size):
+            if total_size > 0:
+                percent = min(100, block_num * block_size * 100 / total_size)
+                mb = block_num * block_size / (1024 * 1024)
+                print(f"\r  Progress: {percent:.1f}% ({mb:.1f} MB)", end="", flush=True)
+
+        urllib.request.urlretrieve(url, model_path, reporthook=report_progress)
+        print()  # Newline after progress
+
+        if path.exists() and path.stat().st_size > 1000:
+            logger.info(f"Downloaded successfully: {model_path}")
+            return True
+        else:
+            logger.error(f"Download failed or file too small: {model_path}")
+            return False
+
+    except Exception as e:
+        logger.error(f"Failed to download {model_name}: {e}")
+        return False
 
 
 def get_model_paths(model_dir: Optional[str] = None) -> Dict[str, str]:
@@ -184,15 +235,16 @@ class UnifiedModelHandler:
     # =========================================================================
 
     def _get_vision_encoder(self):
-        """Lazy load vision encoder ONNX model."""
+        """Lazy load vision encoder ONNX model (auto-downloads if missing)."""
         if self._vision_encoder is None:
             import onnxruntime as ort
             path = self.paths["vision_encoder"]
             if not os.path.exists(path):
-                raise FileNotFoundError(
-                    f"Vision encoder not found: {path}\n"
-                    "Run export_hf_onnx.py to export ONNX models."
-                )
+                if not download_model_if_missing(path, "vision_encoder.onnx"):
+                    raise FileNotFoundError(
+                        f"Vision encoder not found: {path}\n"
+                        "Download failed. Check network or set SAM3_GITHUB_RELEASE_URL."
+                    )
             logger.info(f"Loading vision encoder: {path}")
             self._vision_encoder = ort.InferenceSession(
                 path,
@@ -202,15 +254,16 @@ class UnifiedModelHandler:
         return self._vision_encoder
 
     def _get_text_encoder(self):
-        """Lazy load text encoder ONNX model."""
+        """Lazy load text encoder ONNX model (auto-downloads if missing)."""
         if self._text_encoder is None:
             import onnxruntime as ort
             path = self.paths["text_encoder"]
             if not os.path.exists(path):
-                raise FileNotFoundError(
-                    f"Text encoder not found: {path}\n"
-                    "Run export_hf_onnx.py to export ONNX models."
-                )
+                if not download_model_if_missing(path, "text_encoder.onnx"):
+                    raise FileNotFoundError(
+                        f"Text encoder not found: {path}\n"
+                        "Download failed. Check network or set SAM3_GITHUB_RELEASE_URL."
+                    )
             logger.info(f"Loading text encoder: {path}")
             self._text_encoder = ort.InferenceSession(
                 path,
@@ -220,15 +273,16 @@ class UnifiedModelHandler:
         return self._text_encoder
 
     def _get_pcs_decoder(self):
-        """Lazy load PCS decoder ONNX model."""
+        """Lazy load PCS decoder ONNX model (auto-downloads if missing)."""
         if self._pcs_decoder is None:
             import onnxruntime as ort
             path = self.paths["pcs_decoder"]
             if not os.path.exists(path):
-                raise FileNotFoundError(
-                    f"PCS decoder not found: {path}\n"
-                    "Run export_hf_onnx.py to export ONNX models."
-                )
+                if not download_model_if_missing(path, "pcs_decoder.onnx"):
+                    raise FileNotFoundError(
+                        f"PCS decoder not found: {path}\n"
+                        "Download failed. Check network or set SAM3_GITHUB_RELEASE_URL."
+                    )
             logger.info(f"Loading PCS decoder: {path}")
             self._pcs_decoder = ort.InferenceSession(
                 path,
@@ -238,15 +292,16 @@ class UnifiedModelHandler:
         return self._pcs_decoder
 
     def _get_tracker_decoder(self):
-        """Lazy load tracker decoder ONNX model."""
+        """Lazy load tracker decoder ONNX model (auto-downloads if missing)."""
         if self._tracker_decoder is None:
             import onnxruntime as ort
             path = self.paths["tracker_decoder"]
             if not os.path.exists(path):
-                raise FileNotFoundError(
-                    f"Tracker decoder not found: {path}\n"
-                    "Run export_hf_onnx.py to export ONNX models."
-                )
+                if not download_model_if_missing(path, "tracker_decoder.onnx"):
+                    raise FileNotFoundError(
+                        f"Tracker decoder not found: {path}\n"
+                        "Download failed. Check network or set SAM3_GITHUB_RELEASE_URL."
+                    )
             logger.info(f"Loading tracker decoder: {path}")
             self._tracker_decoder = ort.InferenceSession(
                 path,
