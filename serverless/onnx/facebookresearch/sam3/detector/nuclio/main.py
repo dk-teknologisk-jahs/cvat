@@ -10,6 +10,7 @@ Single function that handles all three AI tool types using ONNX Runtime:
 1. Interactor mode (point/box prompts → embeddings for browser decoding)
 2. Detector mode (text prompts → complete masks via PCS)
 3. Tracker mode (video object tracking)
+4. Text-Track mode (Video PCS: text prompts → detect + track all instances)
 
 NO HUGGINGFACE AUTH NEEDED AT RUNTIME!
 All models are ONNX files baked into the Docker image.
@@ -17,7 +18,8 @@ All models are ONNX files baked into the Docker image.
 Routes requests based on the 'mode' parameter:
 - mode='encode' or no mode → Interactor (returns embeddings)
 - mode='text-to-segment' → Detector (returns masks)
-- mode='track/init' → Tracker initialization
+- mode='track/init' → Tracker initialization (from box prompts)
+- mode='text-track-init' → Text-based tracker init (Video PCS mode)
 - mode='track/frame' → Tracker frame processing
 - mode='track/clear' → Tracker session cleanup
 - mode='info' → Model information
@@ -263,6 +265,99 @@ def handle_track_clear(model, data: Dict) -> Dict[str, Any]:
     return model.clear_tracking(session_id)
 
 
+def handle_text_track_init(model, data: Dict, image: Image.Image) -> Dict[str, Any]:
+    """
+    Handle Video PCS mode - text prompts → detect + track all instances.
+
+    This implements the Phase 1 feature from ONNX_ARCHITECTURE.md:
+    1. Run PCS detection on frame 0 to get all instances matching text prompts
+    2. Initialize tracking state for each detected instance
+    3. Use memory system to propagate all instances in subsequent frames
+
+    Request format:
+    {
+        "mode": "text-track-init",
+        "image": "<base64 encoded first frame>",
+        "text_prompts": ["person", "car"],  # Objects to detect and track
+        "threshold": 0.3  # Optional confidence threshold
+    }
+
+    Response format:
+    {
+        "session_id": "sam3_track_xxxxx",
+        "frame_idx": 0,
+        "tracked_objects": [
+            {"object_id": 0, "box": [x1,y1,x2,y2], "mask": <rle>, "score": 0.95, "label": "person"},
+            {"object_id": 1, "box": [x1,y1,x2,y2], "mask": <rle>, "score": 0.87, "label": "car"},
+            ...
+        ],
+        "text_prompts": ["person", "car"]
+    }
+    """
+    text_prompts = data.get("text_prompts", [])
+    threshold = data.get("threshold", 0.3)
+
+    if not text_prompts:
+        return {"error": "No text_prompts provided for text-track-init"}
+
+    # Use the model's init_tracking_from_text method
+    result = model.init_tracking_from_text(
+        image=image,
+        text_prompts=text_prompts,
+        confidence_threshold=threshold,
+    )
+
+    if "error" in result:
+        return result
+
+    # Format response for CVAT tracker format
+    session_id = result.get("session_id")
+    response_shapes = []
+    response_states = []
+
+    for obj_result in result.get("tracked_objects", []):
+        obj_id = obj_result.get("object_id", len(response_shapes))
+        box = obj_result.get("box", [0, 0, 100, 100])
+        mask = obj_result.get("mask")
+        score = obj_result.get("score", 1.0)
+
+        # Find the label from the original detection if available
+        label = "object"
+        detections = result.get("detections", [])
+        if obj_id < len(detections):
+            label = detections[obj_id].get("label", "object")
+
+        shape = {
+            "type": "rectangle",
+            "points": box,
+            "clientID": obj_id,
+            "label": label,
+            "score": score,
+        }
+
+        # Add mask as RLE if available
+        if mask is not None:
+            rle = mask_to_rle(mask > 0)
+            shape["mask_rle"] = rle
+            shape["type"] = "mask"
+            shape["points"] = rle + box  # CVAT expects RLE + bbox
+
+        response_shapes.append(shape)
+        response_states.append({
+            "session_id": session_id,
+            "object_id": obj_id,
+            "label": label,
+        })
+
+    return {
+        "shapes": response_shapes,
+        "states": response_states,
+        "session_id": session_id,
+        "text_prompts": text_prompts,
+        "num_objects_detected": len(response_shapes),
+    }
+
+
 def init_context(context):
     """Initialize the model handler."""
     context.logger.info("Initializing SAM3 ONNX Unified handler...")
@@ -282,13 +377,18 @@ def handler(context, event):
 
     # Auto-detect mode from request content:
     # - If text_prompts present → text-to-segment (detector)
+    # - If text_prompts + track context → text-track-init (video PCS)
     # - If pos_points/neg_points present → encode (interactor)
     # - If states present → tracker
     # - Explicit mode parameter takes precedence
     mode = data.get("mode")
     if not mode:
         if data.get("text_prompts"):
-            mode = "text-to-segment"
+            # Check if this is a video PCS request (text + tracking context)
+            if data.get("video_mode") or data.get("init_tracking"):
+                mode = "text-track-init"
+            else:
+                mode = "text-to-segment"
         elif data.get("states") and data.get("image"):
             mode = "track/frame"
         elif data.get("shapes") and data.get("image"):
@@ -344,6 +444,8 @@ def handler(context, event):
                     status_code=400,
                 )
             result = handle_text_to_segment(model, data, image)
+        elif mode == "text-track-init":
+            result = handle_text_track_init(model, data, image)
         elif mode == "track/init":
             result = handle_track_init(model, data, image)
         elif mode == "track/frame":

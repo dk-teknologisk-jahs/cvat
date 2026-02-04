@@ -204,7 +204,7 @@ class UnifiedModelHandler:
     All inference uses ONNX Runtime - no HuggingFace auth needed!
     """
 
-    def __init__(self, device: str = "cuda", model_dir: Optional[str] = None):
+    def __init__(self, device: str = "cpu", model_dir: Optional[str] = None):
         import onnxruntime as ort
 
         self.device = device
