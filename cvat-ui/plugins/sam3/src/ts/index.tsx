@@ -232,7 +232,7 @@ const sam3Plugin: SAM3Plugin = {
                     console.log('[SAM3] enter() called with:', { taskID, modelId: model.id, frame });
                     console.log('[SAM3] plugin.data.modelID:', plugin.data.modelID);
                     console.log('[SAM3] plugin.data.initialized:', plugin.data.initialized);
-                    
+
                     return new Promise((resolve, reject) => {
                         function resolvePromise(): void {
                             const key = `${taskID}_${frame}`;
@@ -330,14 +330,14 @@ const sam3Plugin: SAM3Plugin = {
                             console.log('[SAM3] high_res_feats_0_shape:', result.high_res_feats_0_shape);
                         }
                     }
-                    
+
                     return new Promise((resolve, reject) => {
                         if (!isSam3Model(model.id, plugin.data.modelID)) {
                             console.log('[SAM3] leave() Model does not match, passing through result');
                             resolve(result);
                             return;
                         }
-                        
+
                         console.log('[SAM3] leave() Model matches SAM3, processing...');
 
                         const job = Object.values(plugin.data.jobs).find((_job) => (
@@ -493,7 +493,7 @@ const sam3Plugin: SAM3Plugin = {
                                 plugin.data.worker.onmessage = (e: MessageEvent) => {
                                     console.log('[SAM3] Worker DECODE response received');
                                     console.log('[SAM3] Worker response:', e.data);
-                                    
+
                                     if (e.data.action !== WorkerAction.DECODE) {
                                         console.error('[SAM3] Unexpected worker action:', e.data.action);
                                         reject(new Error(

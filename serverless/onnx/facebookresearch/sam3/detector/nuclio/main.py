@@ -150,7 +150,7 @@ def handle_text_to_segment(model, data: Dict, image: Image.Image) -> List[Dict]:
 
 def handle_track_init(model, data: Dict, image: Image.Image) -> Dict[str, Any]:
     """Handle tracker initialization.
-    
+
     CVAT sends shapes as flat coordinate arrays: [[x1, y1, x2, y2], ...]
     Each shape corresponds to a bounding box for tracking.
     """
