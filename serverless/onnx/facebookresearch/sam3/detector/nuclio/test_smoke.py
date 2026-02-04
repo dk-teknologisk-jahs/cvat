@@ -263,6 +263,149 @@ def test_unified_handler(model_dir: Path, device: str = "cpu") -> bool:
     return True
 
 
+def test_text_track_init_smoke(model_dir: Path, device: str = "cpu") -> bool:
+    """Smoke test for text-track-init functionality (Video PCS)."""
+    print("\n[Text-Track-Init (Video PCS)]")
+
+    # Set environment variables
+    os.environ["SAM3_MODEL_DIR"] = str(model_dir)
+    os.environ["SAM3_DEVICE"] = device
+
+    handler_dir = Path(__file__).parent
+    sys.path.insert(0, str(handler_dir))
+
+    try:
+        from model_handler import get_handler, reset_handler
+    except ImportError as e:
+        print_fail(f"Import failed: {e}")
+        return False
+
+    try:
+        reset_handler()
+        handler = get_handler()
+    except Exception as e:
+        print_fail(f"Handler creation failed: {e}")
+        return False
+
+    # Check if video PCS is available
+    info = handler.get_model_info()
+    if not info.get("features", {}).get("video_pcs", False):
+        print_info("Video PCS not available (missing models) - skipped")
+        return None  # Return None for skipped
+
+    # Test init_tracking_from_text
+    try:
+        # Create a simple test image
+        img_arr = np.zeros((256, 256, 3), dtype=np.uint8)
+        img_arr[80:180, 80:180] = [255, 128, 64]  # Orange square
+        img = Image.fromarray(img_arr)
+
+        start = time.time()
+        result = handler.init_tracking_from_text(
+            image=img,
+            text_prompts=["object"],
+            confidence_threshold=0.01,
+        )
+        elapsed = time.time() - start
+
+        if result.get("session_id"):
+            print_ok(f"init_tracking_from_text: {elapsed*1000:.1f}ms")
+            print_info(f"  session_id: {result['session_id']}")
+            print_info(f"  tracked_objects: {len(result.get('tracked_objects', []))}")
+            # Clean up
+            handler.clear_tracking(result["session_id"])
+        else:
+            # No detections is acceptable with synthetic images
+            if "error" in result and "No objects" in result["error"]:
+                print_ok(f"init_tracking_from_text: handled no detections")
+            else:
+                print_info(f"init_tracking_from_text: {result.get('error', 'no session')}")
+
+        return True
+
+    except Exception as e:
+        print_fail(f"init_tracking_from_text failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def test_main_handler_text_track_init(model_dir: Path, device: str = "cpu") -> bool:
+    """Smoke test for the main.py handle_text_track_init function."""
+    print("\n[Main Handler: text-track-init]")
+
+    os.environ["SAM3_MODEL_DIR"] = str(model_dir)
+    os.environ["SAM3_DEVICE"] = device
+
+    handler_dir = Path(__file__).parent
+    sys.path.insert(0, str(handler_dir))
+
+    # Reset modules
+    for mod in ["model_handler", "main"]:
+        if mod in sys.modules:
+            del sys.modules[mod]
+
+    try:
+        from model_handler import get_handler, reset_handler
+        from main import handle_text_track_init
+        print_ok("Imported main.handle_text_track_init")
+    except ImportError as e:
+        print_fail(f"Import failed: {e}")
+        return False
+
+    try:
+        reset_handler()
+        handler = get_handler()
+    except Exception as e:
+        print_fail(f"Handler creation failed: {e}")
+        return False
+
+    # Check capabilities
+    info = handler.get_model_info()
+    if not info.get("features", {}).get("video_pcs", False):
+        print_info("Video PCS not available - skipped")
+        return None
+
+    try:
+        # Create test image
+        img_arr = np.zeros((256, 256, 3), dtype=np.uint8)
+        img_arr[60:200, 60:200] = [100, 200, 100]  # Green square
+        img = Image.fromarray(img_arr)
+
+        # Test handle_text_track_init
+        data = {
+            "text_prompts": ["object"],
+            "threshold": 0.01,
+        }
+
+        start = time.time()
+        result = handle_text_track_init(handler, data, img)
+        elapsed = time.time() - start
+
+        if "error" in result:
+            if "No text_prompts" in result["error"]:
+                print_fail("Empty prompts not handled correctly")
+                return False
+            # No detections is OK
+            print_ok(f"handle_text_track_init: {elapsed*1000:.1f}ms (no detections)")
+        else:
+            print_ok(f"handle_text_track_init: {elapsed*1000:.1f}ms")
+            print_info(f"  session_id: {result.get('session_id', 'N/A')}")
+            print_info(f"  shapes: {len(result.get('shapes', []))}")
+            print_info(f"  states: {len(result.get('states', []))}")
+            # Clean up
+            if result.get("session_id"):
+                handler.clear_tracking(result["session_id"])
+
+        return True
+
+    except Exception as e:
+        print_fail(f"handle_text_track_init failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(description="SAM3 ONNX Smoke Tests")
     parser.add_argument("--model-dir", type=str, required=True, help="ONNX model directory")
@@ -285,6 +428,8 @@ def main():
     results.append(("Tracker Decoder", test_tracker_decoder(model_dir / "tracker_decoder.onnx", device)))
     results.append(("Text Encoder", test_text_encoder(model_dir / "text_encoder.onnx", device)))
     results.append(("Unified Handler", test_unified_handler(model_dir, device)))
+    results.append(("Text-Track-Init (Model)", test_text_track_init_smoke(model_dir, device)))
+    results.append(("Text-Track-Init (Handler)", test_main_handler_text_track_init(model_dir, device)))
 
     # Summary
     print("\n" + "=" * 60)

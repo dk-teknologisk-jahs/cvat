@@ -742,7 +742,7 @@ def run_refinement_tests(tester: SAM3OnnxTester) -> List[TestResult]:
     return results
 
 
-def run_pytorch_comparison(model_dir: Path, device: str = "cuda") -> List[TestResult]:
+def run_pytorch_comparison(model_dir: Path, device: str = "cpu") -> List[TestResult]:
     """Compare ONNX outputs to PyTorch reference."""
     print_section("ONNX vs PyTorch Comparison")
 
