@@ -8,7 +8,6 @@ import React, { useEffect, useState } from 'react';
 import { Row, Col } from 'antd/lib/grid';
 import Select from 'antd/lib/select';
 import Text from 'antd/lib/typography/Text';
-import Input from 'antd/lib/input';
 import InputNumber from 'antd/lib/input-number';
 import Button from 'antd/lib/button';
 import Switch from 'antd/lib/switch';
@@ -76,22 +75,14 @@ function DetectorRunner(props: Props): JSX.Element {
     const [detectorThreshold, setDetectorThreshold] = useState<number | null>(null);
     const [modelLabels, setModelLabels] = useState<LabelInterface[]>([]);
     const [taskLabels, setTaskLabels] = useState<LabelInterface[]>([]);
-    const [textPrompt, setTextPrompt] = useState<string>('');
 
     const model = models.find((_model): boolean => _model.id === modelID);
     const isDetector = model?.kind === ModelKind.DETECTOR;
     const isReId = model?.kind === ModelKind.REID;
-    const supportsTextPrompt = isDetector && model?.supportsTextPrompt;
     const convertMasks2PolygonVisible = isDetector &&
         [LabelType.ANY, LabelType.MASK].includes(model.returnType);
 
-    // For text prompt models, button is enabled when there's a text prompt
-    // For regular detectors, button is enabled when there's a label mapping
-    const buttonEnabled = model && (
-        isReId ||
-        (isDetector && supportsTextPrompt && textPrompt.trim().length > 0) ||
-        (isDetector && !supportsTextPrompt && mapping.length)
-    );
+    const buttonEnabled = model && (isReId || (isDetector && mapping.length));
 
     useEffect(() => {
         const converted = labels.map((label) => ({
@@ -149,31 +140,7 @@ function DetectorRunner(props: Props): JSX.Element {
                     </Select>
                 </Col>
             </Row>
-            {isDetector && supportsTextPrompt && (
-                <div className='cvat-detector-runner-text-prompt-wrapper'>
-                    <Row align='middle'>
-                        <Col span={4}>
-                            <Text>Text Prompt:</Text>
-                        </Col>
-                        <Col span={20}>
-                            <Input.TextArea
-                                placeholder='Enter object descriptions to find, e.g. "person, car, dog"'
-                                value={textPrompt}
-                                onChange={(e) => setTextPrompt(e.target.value)}
-                                autoSize={{ minRows: 2, maxRows: 4 }}
-                            />
-                        </Col>
-                    </Row>
-                    <Row>
-                        <Col offset={4}>
-                            <Text type='secondary'>
-                                Separate multiple objects with commas. Supports 270K+ concepts.
-                            </Text>
-                        </Col>
-                    </Row>
-                </div>
-            )}
-            {isDetector && !supportsTextPrompt && (
+            {isDetector && (
                 <div>
                     <div className='cvat-detector-runner-mapping-header'>
                         <div>
@@ -287,26 +254,14 @@ function DetectorRunner(props: Props): JSX.Element {
                         type='primary'
                         onClick={() => {
                             if (!model) return;
+                            const serverMapping = convertMappingToServer(mapping);
                             if (model.kind === ModelKind.DETECTOR) {
-                                if (model.supportsTextPrompt) {
-                                    // Text prompt based detection
-                                    const prompts = textPrompt.split(',').map((p) => p.trim()).filter((p) => p.length > 0);
-                                    runInference(model, {
-                                        text_prompts: prompts,
-                                        cleanup,
-                                        conv_mask_to_poly: convertMasksToPolygons,
-                                        ...(detectorThreshold !== null ? { threshold: detectorThreshold } : {}),
-                                    });
-                                } else {
-                                    // Label mapping based detection
-                                    const serverMapping = convertMappingToServer(mapping);
-                                    runInference(model, {
-                                        mapping: serverMapping,
-                                        cleanup,
-                                        conv_mask_to_poly: convertMasksToPolygons,
-                                        ...(detectorThreshold !== null ? { threshold: detectorThreshold } : {}),
-                                    });
-                                }
+                                runInference(model, {
+                                    mapping: serverMapping,
+                                    cleanup,
+                                    conv_mask_to_poly: convertMasksToPolygons,
+                                    ...(detectorThreshold !== null ? { threshold: detectorThreshold } : {}),
+                                });
                             } else if (model.kind === ModelKind.REID) {
                                 runInference(model, { threshold, max_distance: distance });
                             }
