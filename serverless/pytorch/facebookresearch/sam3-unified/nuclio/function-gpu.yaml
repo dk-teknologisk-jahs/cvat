@@ -18,7 +18,7 @@ metadata:
     # - text-to-segment (detector): Text prompts → masks
     # - track/* (tracker): Video object tracking
     framework: pytorch
-    supports_text_prompt: true
+    supports_text_prompt: "true"
     help_message: |
       Unified SAM3 supporting interactor, detector, and tracker modes.
       Uses a single model load to save GPU memory (~8GB VRAM).

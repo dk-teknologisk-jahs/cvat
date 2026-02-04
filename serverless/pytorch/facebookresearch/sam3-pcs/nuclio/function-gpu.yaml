@@ -11,7 +11,7 @@ metadata:
     type: detector
     spec:
     framework: pytorch
-    supports_text_prompt: true
+    supports_text_prompt: "true"
     help_message: SAM3 text-to-segment allows finding and segmenting objects using text descriptions. Supports 270K+ concepts.
 
 spec:

@@ -15,7 +15,7 @@ metadata:
     startswith_box_optional: true
     # Also supports text-to-segment via mode parameter
     framework: pytorch
-    supports_text_prompt: true
+    supports_text_prompt: "true"
     help_message: |
       Unified SAM3 supporting both point/box prompts (interactor) and text prompts (detector).
       Uses a single model load. CPU version - slower but no GPU required.

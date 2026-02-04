@@ -149,23 +149,39 @@ def handle_text_to_segment(model, data: Dict, image: Image.Image) -> List[Dict]:
 
 
 def handle_track_init(model, data: Dict, image: Image.Image) -> Dict[str, Any]:
-    """Handle tracker initialization."""
+    """Handle tracker initialization.
+    
+    CVAT sends shapes as flat coordinate arrays: [[x1, y1, x2, y2], ...]
+    Each shape corresponds to a bounding box for tracking.
+    """
     shapes = data.get("shapes", [])
+    states = data.get("states", [])
 
     if not shapes:
         return {"error": "No shapes provided for tracking initialization"}
 
     # Convert CVAT shapes to SAM3 format
+    # CVAT format: shapes is a list of coordinate arrays [[x1, y1, x2, y2], ...]
     objects = []
-    for shape in shapes:
-        points = shape.get("points", [])
-        if len(points) >= 4:
-            x1, y1, x2, y2 = points[0], points[1], points[2], points[3]
+    for idx, shape in enumerate(shapes):
+        # shape is a flat list: [x1, y1, x2, y2]
+        if isinstance(shape, (list, tuple)) and len(shape) >= 4:
+            x1, y1, x2, y2 = shape[0], shape[1], shape[2], shape[3]
             objects.append({
-                "object_id": shape.get("clientID", len(objects)),
+                "object_id": idx,
                 "box": [x1, y1, x2, y2],
-                "label": shape.get("label", "object"),
+                "label": "object",
             })
+        elif isinstance(shape, dict):
+            # Legacy format with points key
+            points = shape.get("points", [])
+            if len(points) >= 4:
+                x1, y1, x2, y2 = points[0], points[1], points[2], points[3]
+                objects.append({
+                    "object_id": shape.get("clientID", idx),
+                    "box": [x1, y1, x2, y2],
+                    "label": shape.get("label", "object"),
+                })
 
     result = model.init_tracking(image=image, objects=objects)
 
@@ -173,17 +189,15 @@ def handle_track_init(model, data: Dict, image: Image.Image) -> Dict[str, Any]:
         return result
 
     # Format for CVAT tracker response
+    # CVAT expects shapes as flat coordinate arrays: [[x1, y1, x2, y2], ...]
     session_id = result["session_id"]
     response_shapes = []
     response_states = []
 
     for obj_result in result.get("tracked_objects", []):
         box = obj_result.get("box", [0, 0, 100, 100])
-        response_shapes.append({
-            "type": "rectangle",
-            "points": box,
-            "clientID": obj_result["object_id"],
-        })
+        # Return flat coordinate array, not object with points
+        response_shapes.append(box)
         response_states.append({
             "session_id": session_id,
             "object_id": obj_result["object_id"],
@@ -228,17 +242,14 @@ def handle_track_frame(model, data: Dict, image: Image.Image) -> Dict[str, Any]:
     if "error" in result:
         return result
 
-    # Format response
+    # Format response - CVAT expects shapes as flat coordinate arrays
     response_shapes = []
     response_states = []
 
     for i, obj_result in enumerate(result.get("tracked_objects", [])):
         box = obj_result.get("box", [0, 0, 100, 100])
-        response_shapes.append({
-            "type": "rectangle",
-            "points": box,
-            "clientID": object_ids[i] if i < len(object_ids) else i,
-        })
+        # Return flat coordinate array, not object with points
+        response_shapes.append(box)
         response_states.append({
             "session_id": session_id,
             "object_id": object_ids[i] if i < len(object_ids) else i,

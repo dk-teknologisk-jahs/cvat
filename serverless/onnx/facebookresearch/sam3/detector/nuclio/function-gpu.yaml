@@ -27,7 +27,7 @@ metadata:
     type: detector
     spec:
     framework: onnx
-    supports_text_prompt: true
+    supports_text_prompt: "true"
     help_message: |
       SAM3 text-to-segment detector using Promptable Cascade Segmentation (PCS).
       Supports 270K+ object concepts via text descriptions.

@@ -147,7 +147,7 @@ def handle_track_init(model, data: Dict, image: Image.Image) -> Dict[str, Any]:
     Handle tracker initialization - start tracking objects in video.
 
     CVAT tracker interface sends:
-    - shapes: list of bbox annotations to track
+    - shapes: list of bbox coordinates as [[x1, y1, x2, y2], ...]
     - states: list of previous states (empty on init)
     """
     shapes = data.get("shapes", [])
@@ -156,18 +156,27 @@ def handle_track_init(model, data: Dict, image: Image.Image) -> Dict[str, Any]:
         return {"error": "No shapes provided for tracking initialization"}
 
     # Convert CVAT shapes to SAM3 format
+    # CVAT format: shapes is a list of coordinate arrays [[x1, y1, x2, y2], ...]
     objects = []
-    for shape in shapes:
-        # CVAT sends points as [x1, y1, x2, y2, ...]
-        points = shape.get("points", [])
-        if len(points) >= 4:
-            # Extract bounding box
-            x1, y1, x2, y2 = points[0], points[1], points[2], points[3]
+    for idx, shape in enumerate(shapes):
+        # shape is a flat list: [x1, y1, x2, y2]
+        if isinstance(shape, (list, tuple)) and len(shape) >= 4:
+            x1, y1, x2, y2 = shape[0], shape[1], shape[2], shape[3]
             objects.append({
-                "object_id": shape.get("clientID", len(objects)),
+                "object_id": idx,
                 "box": [x1, y1, x2, y2],
-                "label": shape.get("label", "object"),
+                "label": "object",
             })
+        elif isinstance(shape, dict):
+            # Legacy format with points key
+            points = shape.get("points", [])
+            if len(points) >= 4:
+                x1, y1, x2, y2 = points[0], points[1], points[2], points[3]
+                objects.append({
+                    "object_id": shape.get("clientID", idx),
+                    "box": [x1, y1, x2, y2],
+                    "label": shape.get("label", "object"),
+                })
 
     # Initialize tracking
     result = model.init_tracking(
@@ -179,7 +188,7 @@ def handle_track_init(model, data: Dict, image: Image.Image) -> Dict[str, Any]:
         return result
 
     # Return CVAT tracker response format
-    # CVAT expects: shapes (updated) + states (serialized state per object)
+    # CVAT expects shapes as flat coordinate arrays: [[x1, y1, x2, y2], ...]
     session_id = result["session_id"]
 
     # Build response
@@ -187,12 +196,9 @@ def handle_track_init(model, data: Dict, image: Image.Image) -> Dict[str, Any]:
     response_states = []
 
     for obj_result in result.get("tracked_objects", []):
-        # Each object gets its updated shape
-        response_shapes.append({
-            "type": "rectangle",
-            "points": obj_result["bounds"],  # [x1, y1, x2, y2]
-            "clientID": obj_result["object_id"],
-        })
+        # Return flat coordinate array, not object with points
+        box = obj_result.get("bounds", obj_result.get("box", [0, 0, 100, 100]))
+        response_shapes.append(box)
 
         # State just contains the session_id (actual state is in Redis)
         response_states.append({
@@ -250,30 +256,19 @@ def handle_track_frame(model, data: Dict, image: Image.Image) -> Dict[str, Any]:
     if "error" in result:
         return result
 
-    # Build CVAT response
+    # Build CVAT response - shapes as flat coordinate arrays
     response_shapes = []
     response_states = []
 
     # Single object result for now
     if "bounds" in result:
-        response_shapes.append({
-            "type": "rectangle",
-            "points": result["bounds"],
-            "clientID": object_ids[0] if object_ids else 0,
-        })
+        # Return flat coordinate array, not object with points
+        response_shapes.append(result["bounds"])
         response_states.append({
             "session_id": session_id,
             "object_id": object_ids[0] if object_ids else 0,
             "frame_idx": result["frame_idx"],
         })
-
-        # Also include polygon if available
-        if "polygon" in result and result["polygon"]:
-            response_shapes.append({
-                "type": "polygon",
-                "points": result["polygon"],
-                "clientID": object_ids[0] if object_ids else 0,
-            })
 
     return {
         "shapes": response_shapes,
