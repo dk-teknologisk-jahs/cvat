@@ -19,7 +19,7 @@ metadata:
   namespace: cvat
   annotations:
     name: SAM3 Interactor (ONNX)
-    version: 1
+    version: 2
     type: interactor
     spec:
     min_pos_points: 0
