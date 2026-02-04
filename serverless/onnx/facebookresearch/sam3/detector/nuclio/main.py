@@ -110,26 +110,47 @@ def handle_encode(model, image: Image.Image) -> Dict[str, Any]:
     }
 
 
+# Default labels to detect when no specific prompts are provided
+# These are the most common objects that users typically want to detect
+# CVAT will filter results based on user's mapping selection
+DEFAULT_DETECTION_LABELS = [
+    # People and body parts
+    "person", "face", "hand",
+    # Vehicles
+    "car", "truck", "bus", "motorcycle", "bicycle", "boat", "airplane", "train",
+    # Animals
+    "dog", "cat", "bird", "horse", "cow", "sheep", "elephant", "bear", "zebra", "giraffe",
+    # Common objects
+    "chair", "couch", "bed", "dining table", "toilet", "tv", "laptop", "cell phone",
+    "bottle", "cup", "bowl", "knife", "fork", "spoon",
+    # Food
+    "banana", "apple", "orange", "pizza", "cake", "sandwich", "carrot", "broccoli", "potato",
+    # Outdoor
+    "traffic light", "stop sign", "bench", "tree", "flower",
+    # Other common
+    "backpack", "umbrella", "handbag", "suitcase", "book", "clock",
+]
+
+
 def handle_text_to_segment(model, data: Dict, image: Image.Image) -> List[Dict]:
     """Handle detector mode - return complete masks for text prompts.
 
     Text prompts can come from:
     1. Explicit 'text_prompts' field (advanced API)
-    2. 'mapping' field from CVAT detector UI (keys are the label names to detect)
+    2. Default common labels (when no prompts provided)
+    
+    NOTE: CVAT doesn't pass 'mapping' to the Nuclio function for detectors.
+    The mapping is used by CVAT to filter results AFTER the function returns.
+    So we detect using default labels and CVAT filters to user's selection.
     """
     text_prompts = data.get("text_prompts", [])
 
-    # If no explicit text_prompts, extract from CVAT mapping
-    # The mapping keys are the model label names that the user wants to detect
+    # Use default labels if no explicit prompts provided
     if not text_prompts:
-        mapping = data.get("mapping", {})
-        if mapping:
-            text_prompts = list(mapping.keys())
+        text_prompts = DEFAULT_DETECTION_LABELS
+        logger.info(f"Using default detection labels ({len(text_prompts)} classes)")
 
     threshold = data.get("threshold", 0.3)
-
-    if not text_prompts:
-        return []  # Nothing to detect
 
     detections = model.text_to_segment(
         text_prompts=text_prompts,
@@ -403,31 +424,37 @@ def handler(context, event):
     model = context.user_data.model
 
     # Auto-detect mode from request content:
-    # - If mapping present (CVAT detector) → text-to-segment
-    # - If text_prompts present → text-to-segment (detector)
-    # - If text_prompts + track context → text-track-init (video PCS)
-    # - If pos_points/neg_points present → encode (interactor)
-    # - If states present → tracker
+    # - Interactor: has pos_points/neg_points → encode mode
+    # - Detector: only image (no pos_points) → text-to-segment mode
+    # - Tracker init: has shapes → track/init
+    # - Tracker frame: has states → track/frame
     # - Explicit mode parameter takes precedence
+    #
+    # NOTE: CVAT doesn't pass 'mapping' to the Nuclio function for detectors.
+    # It only sends {"image": ..., "threshold": ...}
+    # The mapping is used by CVAT to filter results AFTER the function returns.
     mode = data.get("mode")
     if not mode:
-        if data.get("mapping") and data.get("image"):
-            # CVAT detector UI sends mapping with label names to detect
-            mode = "text-to-segment"
-        elif data.get("text_prompts"):
-            # Check if this is a video PCS request (text + tracking context)
+        if data.get("text_prompts"):
+            # Explicit text prompts (advanced API)
             if data.get("video_mode") or data.get("init_tracking"):
                 mode = "text-track-init"
             else:
                 mode = "text-to-segment"
+        elif data.get("pos_points") is not None or data.get("neg_points") is not None:
+            # Interactor mode - has point prompts
+            mode = "encode"
         elif data.get("states") and data.get("image"):
             mode = "track/frame"
         elif data.get("shapes") and data.get("image"):
             mode = "track/init"
+        elif data.get("image") and not data.get("pos_points"):
+            # Only image provided (no point prompts) → detector mode
+            mode = "text-to-segment"
         else:
-            mode = "encode"  # Default for interactor
+            mode = "encode"  # Fallback for interactor
 
-    logger.info(f"Processing request with mode: {mode}")
+    logger.info(f"Processing request with mode: {mode}, keys: {list(data.keys())}")
 
     try:
         # Handle info request (no image needed)
