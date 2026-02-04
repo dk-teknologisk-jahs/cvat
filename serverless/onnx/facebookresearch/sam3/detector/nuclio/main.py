@@ -111,9 +111,25 @@ def handle_encode(model, image: Image.Image) -> Dict[str, Any]:
 
 
 def handle_text_to_segment(model, data: Dict, image: Image.Image) -> List[Dict]:
-    """Handle detector mode - return complete masks for text prompts."""
+    """Handle detector mode - return complete masks for text prompts.
+
+    Text prompts can come from:
+    1. Explicit 'text_prompts' field (advanced API)
+    2. 'mapping' field from CVAT detector UI (keys are the label names to detect)
+    """
     text_prompts = data.get("text_prompts", [])
+
+    # If no explicit text_prompts, extract from CVAT mapping
+    # The mapping keys are the model label names that the user wants to detect
+    if not text_prompts:
+        mapping = data.get("mapping", {})
+        if mapping:
+            text_prompts = list(mapping.keys())
+
     threshold = data.get("threshold", 0.3)
+
+    if not text_prompts:
+        return []  # Nothing to detect
 
     detections = model.text_to_segment(
         text_prompts=text_prompts,
@@ -387,6 +403,7 @@ def handler(context, event):
     model = context.user_data.model
 
     # Auto-detect mode from request content:
+    # - If mapping present (CVAT detector) → text-to-segment
     # - If text_prompts present → text-to-segment (detector)
     # - If text_prompts + track context → text-track-init (video PCS)
     # - If pos_points/neg_points present → encode (interactor)
@@ -394,7 +411,10 @@ def handler(context, event):
     # - Explicit mode parameter takes precedence
     mode = data.get("mode")
     if not mode:
-        if data.get("text_prompts"):
+        if data.get("mapping") and data.get("image"):
+            # CVAT detector UI sends mapping with label names to detect
+            mode = "text-to-segment"
+        elif data.get("text_prompts"):
             # Check if this is a video PCS request (text + tracking context)
             if data.get("video_mode") or data.get("init_tracking"):
                 mode = "text-track-init"
@@ -446,14 +466,7 @@ def handler(context, event):
         if mode == "encode":
             result = handle_encode(model, image)
         elif mode == "text-to-segment":
-            text_prompts = data.get("text_prompts", [])
-            if not text_prompts:
-                return context.Response(
-                    body=json.dumps({"error": "No text_prompts provided"}),
-                    headers={},
-                    content_type="application/json",
-                    status_code=400,
-                )
+            # text_prompts can come from explicit field or from mapping keys
             result = handle_text_to_segment(model, data, image)
         elif mode == "text-track-init":
             result = handle_text_track_init(model, data, image)
