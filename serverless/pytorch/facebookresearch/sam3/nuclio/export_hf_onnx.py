@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-SAM3 ONNX Export Script
+SAM3 HuggingFace ONNX Export Script
 
-Main export script for SAM3 ONNX models from HuggingFace Transformers.
+Exports all SAM3 components from HuggingFace Transformers to ONNX format.
 This gives us full control over the ONNX models instead of relying on external sources.
 
 Components exported:
@@ -11,8 +11,6 @@ Components exported:
 3. Text Encoder - for PCS text-to-segment mode
 4. PCS Decoder - for text-to-segment detection
 
-For memory components (video propagation), see: export_memory_components.py
-
 Key design decisions:
 - Vision encoder outputs raw FPN features (256 channels at all levels)
 - Tracker decoder includes conv_s0/conv_s1 projections internally
@@ -20,16 +18,16 @@ Key design decisions:
 
 Usage:
     # Export all components
-    python export_onnx.py --all --output-dir ./onnx-exports
+    python export_hf_onnx.py --all --output-dir ./onnx-exports
 
     # Export specific components
-    python export_onnx.py --vision-encoder --output-dir ./onnx-exports
-    python export_onnx.py --tracker-decoder --output-dir ./onnx-exports
-    python export_onnx.py --text-encoder --output-dir ./onnx-exports
-    python export_onnx.py --pcs-decoder --output-dir ./onnx-exports
+    python export_hf_onnx.py --vision-encoder --output-dir ./onnx-exports
+    python export_hf_onnx.py --tracker-decoder --output-dir ./onnx-exports
+    python export_hf_onnx.py --text-encoder --output-dir ./onnx-exports
+    python export_hf_onnx.py --pcs-decoder --output-dir ./onnx-exports
 
     # Verify equivalence with PyTorch
-    python export_onnx.py --verify --output-dir ./onnx-exports
+    python export_hf_onnx.py --verify --output-dir ./onnx-exports
 """
 
 import argparse
