@@ -86,6 +86,12 @@ interface ClickType {
 // SAM3 uses 1008x1008 input resolution
 const SAM3_IMAGE_SIZE = 1008;
 
+// Check if a model ID matches SAM3 ONNX functions
+// Matches: onnx-facebookresearch-sam3-detector, onnx-facebookresearch-sam3-interactor-proxy, etc.
+function isSam3Model(modelId: string, pluginModelIdPrefix: string): boolean {
+    return modelId.startsWith(pluginModelIdPrefix);
+}
+
 function getModelScale(w: number, h: number) {
     const scaleX = SAM3_IMAGE_SIZE / w;
     const scaleY = SAM3_IMAGE_SIZE / h;
@@ -235,7 +241,7 @@ const sam3Plugin: SAM3Plugin = {
                             }
                         }
 
-                        if (model.id === plugin.data.modelID) {
+                        if (isSam3Model(model.id, plugin.data.modelID)) {
                             if (!plugin.data.initialized) {
                                 plugin.data.worker.postMessage({
                                     action: WorkerAction.INIT,
@@ -289,7 +295,7 @@ const sam3Plugin: SAM3Plugin = {
                     bounds: [number, number, number, number];
                 }> {
                     return new Promise((resolve, reject) => {
-                        if (model.id !== plugin.data.modelID) {
+                        if (!isSam3Model(model.id, plugin.data.modelID)) {
                             resolve(result);
                             return;
                         }
@@ -471,10 +477,11 @@ const sam3Plugin: SAM3Plugin = {
         core: null,
         worker: new Worker(new URL('./inference.worker', import.meta.url)),
         jobs: {},
-        // Use ONNX detector function (main function with all models)
-        // The detector deploys first alphabetically, ensuring it's always ready
-        // Interactor mode is handled via interactor-proxy, but plugin calls detector directly
-        modelID: 'onnx-facebookresearch-sam3-detector',
+        // Match all SAM3 ONNX functions (detector, interactor-proxy)
+        // The plugin handles both:
+        // - Direct detector calls (text-to-segment mode)
+        // - Interactor proxy calls (point/box prompts with browser-side decoding)
+        modelID: 'onnx-facebookresearch-sam3',  // Prefix match
         // Decoder matching the vision encoder from export_hf_onnx.py
         // Supports 256ch inputs and mask refinement
         modelURL: '/assets/tracker_decoder.onnx',
