@@ -205,7 +205,7 @@ def test_vision_encoder_equivalence(
 ) -> TestResult:
     """
     Test that ONNX vision encoder produces identical outputs to PyTorch.
-    
+
     Note: PyTorch SAM3 model requires CUDA. This test is skipped on CPU.
     """
     import torch
@@ -216,12 +216,12 @@ def test_vision_encoder_equivalence(
 
     start_time = time.time()
     metrics = {}
-    
+
     # Skip if CUDA not available - SAM3 PyTorch model requires CUDA
     if device == "cpu" or not torch.cuda.is_available():
         print_info("Skipping PyTorch comparison - SAM3 model requires CUDA")
         return TestResult(
-            "vision_encoder_equivalence", True, 0, 
+            "vision_encoder_equivalence", True, 0,
             {"skipped": "PyTorch SAM3 model requires CUDA"},
             None
         )
@@ -334,7 +334,7 @@ def test_text_encoder_equivalence(
 ) -> TestResult:
     """
     Test that ONNX text encoder produces identical outputs to PyTorch.
-    
+
     Note: PyTorch SAM3 model requires CUDA. This test is skipped on CPU.
     """
     import torch
@@ -344,7 +344,7 @@ def test_text_encoder_equivalence(
 
     start_time = time.time()
     metrics = {}
-    
+
     # Skip if CUDA not available - SAM3 PyTorch model requires CUDA
     if device == "cpu" or not torch.cuda.is_available():
         print_info("Skipping PyTorch comparison - SAM3 model requires CUDA")
@@ -460,7 +460,7 @@ def test_tracker_decoder_equivalence(
     """
     Test that ONNX tracker decoder produces identical outputs to PyTorch.
     Tests point prompts on real images.
-    
+
     Note: PyTorch SAM3 model requires CUDA. This test is skipped on CPU.
     """
     import torch
@@ -471,7 +471,7 @@ def test_tracker_decoder_equivalence(
 
     start_time = time.time()
     metrics = {}
-    
+
     # Skip if CUDA not available - SAM3 PyTorch model requires CUDA
     if device == "cpu" or not torch.cuda.is_available():
         print_info("Skipping PyTorch comparison - SAM3 model requires CUDA")
@@ -618,7 +618,7 @@ def test_pcs_decoder_equivalence(
     """
     Test that ONNX PCS decoder produces identical outputs to PyTorch.
     Tests text-to-segment on real images.
-    
+
     Note: PyTorch SAM3 model requires CUDA. This test is skipped on CPU.
     """
     import torch
@@ -628,7 +628,7 @@ def test_pcs_decoder_equivalence(
 
     start_time = time.time()
     metrics = {}
-    
+
     # Skip if CUDA not available - SAM3 PyTorch model requires CUDA
     if device == "cpu" or not torch.cuda.is_available():
         print_info("Skipping PyTorch comparison - SAM3 model requires CUDA")

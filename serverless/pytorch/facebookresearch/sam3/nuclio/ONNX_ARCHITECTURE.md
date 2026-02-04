@@ -238,7 +238,7 @@ Frame 0 (text-track-init):
   For each detected object:
     box → Tracker Decoder → initial mask, obj_ptr
     mask → Memory Encoder → memory_features
-  
+
   Return: session_id, tracked_objects[], states[]
 
 Frame N (track/frame):
@@ -247,7 +247,7 @@ Frame N (track/frame):
     features + memories → Memory Attention → conditioned_features
     conditioned_features → Tracker Decoder → mask, obj_ptr
     mask → Memory Encoder → update memories
-  
+
   Return: updated tracked_objects[]
 ```
 
