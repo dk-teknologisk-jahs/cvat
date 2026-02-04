@@ -229,9 +229,15 @@ const sam3Plugin: SAM3Plugin = {
                     { frame }: { frame: number },
                 ): Promise<null | APIWrapperEnterOptions> {
                     console.log('[SAM3] === ENTER HOOK START ===');
-                    console.log('[SAM3] enter() called with:', { taskID, modelId: model.id, frame });
+                    console.log('[SAM3] enter() called with:', { taskID, modelId: model.id, frame, kind: model.kind });
                     console.log('[SAM3] plugin.data.modelID:', plugin.data.modelID);
                     console.log('[SAM3] plugin.data.initialized:', plugin.data.initialized);
+
+                    // Only intercept interactor calls - trackers and detectors are handled server-side
+                    if (model.kind !== 'interactor') {
+                        console.log('[SAM3] enter() Skipping non-interactor model (kind=' + model.kind + ')');
+                        return null;
+                    }
 
                     return new Promise((resolve, reject) => {
                         function resolvePromise(): void {
@@ -314,12 +320,19 @@ const sam3Plugin: SAM3Plugin = {
                     bounds: [number, number, number, number];
                 }> {
                     console.log('[SAM3] === LEAVE HOOK START ===');
-                    console.log('[SAM3] leave() called with:', { taskID, modelId: model.id, frame });
+                    console.log('[SAM3] leave() called with:', { taskID, modelId: model.id, frame, kind: model.kind });
                     console.log('[SAM3] leave() pos_points:', pos_points);
                     console.log('[SAM3] leave() neg_points:', neg_points);
                     console.log('[SAM3] leave() obj_bbox:', obj_bbox);
                     console.log('[SAM3] leave() result type:', typeof result);
                     console.log('[SAM3] leave() result:', result);
+
+                    // Only intercept interactor calls - trackers and detectors are handled server-side
+                    if (model.kind !== 'interactor') {
+                        console.log('[SAM3] leave() Skipping non-interactor model (kind=' + model.kind + '), returning result as-is');
+                        return result;
+                    }
+
                     if (result) {
                         console.log('[SAM3] leave() result keys:', Object.keys(result));
                         console.log('[SAM3] leave() has high_res_feats_0:', 'high_res_feats_0' in result);
