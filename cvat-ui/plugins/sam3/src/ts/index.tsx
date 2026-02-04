@@ -89,7 +89,9 @@ const SAM3_IMAGE_SIZE = 1008;
 // Check if a model ID matches SAM3 ONNX functions
 // Matches: onnx-facebookresearch-sam3-detector, onnx-facebookresearch-sam3-interactor-proxy, etc.
 function isSam3Model(modelId: string, pluginModelIdPrefix: string): boolean {
-    return modelId.startsWith(pluginModelIdPrefix);
+    const matches = modelId.startsWith(pluginModelIdPrefix);
+    console.log(`[SAM3] isSam3Model check: modelId="${modelId}", prefix="${pluginModelIdPrefix}", matches=${matches}`);
+    return matches;
 }
 
 function getModelScale(w: number, h: number) {
@@ -226,6 +228,11 @@ const sam3Plugin: SAM3Plugin = {
                     model: MLModel,
                     { frame }: { frame: number },
                 ): Promise<null | APIWrapperEnterOptions> {
+                    console.log('[SAM3] === ENTER HOOK START ===');
+                    console.log('[SAM3] enter() called with:', { taskID, modelId: model.id, frame });
+                    console.log('[SAM3] plugin.data.modelID:', plugin.data.modelID);
+                    console.log('[SAM3] plugin.data.initialized:', plugin.data.initialized);
+                    
                     return new Promise((resolve, reject) => {
                         function resolvePromise(): void {
                             const key = `${taskID}_${frame}`;
@@ -234,15 +241,20 @@ const sam3Plugin: SAM3Plugin = {
                                 plugin.data.emb1Cache.has(key) &&
                                 plugin.data.emb2Cache.has(key)
                             );
+                            console.log('[SAM3] resolvePromise(): key=', key, 'hasAllFeatures=', hasAllFeatures);
                             if (hasAllFeatures) {
+                                console.log('[SAM3] enter() resolving with preventMethodCall=true (using cached embeddings)');
                                 resolve({ preventMethodCall: true });
                             } else {
+                                console.log('[SAM3] enter() resolving with null (will fetch from server)');
                                 resolve(null);
                             }
                         }
 
                         if (isSam3Model(model.id, plugin.data.modelID)) {
+                            console.log('[SAM3] Model matches SAM3, checking initialization...');
                             if (!plugin.data.initialized) {
+                                console.log('[SAM3] Initializing worker with decoder:', plugin.data.modelURL);
                                 plugin.data.worker.postMessage({
                                     action: WorkerAction.INIT,
                                     payload: {
@@ -251,7 +263,9 @@ const sam3Plugin: SAM3Plugin = {
                                 });
 
                                 plugin.data.worker.onmessage = (e: MessageEvent) => {
+                                    console.log('[SAM3] Worker INIT response:', e.data);
                                     if (e.data.action !== WorkerAction.INIT) {
+                                        console.error('[SAM3] Unexpected worker action:', e.data.action);
                                         reject(new Error(
                                             `Caught unexpected action response from worker: ${e.data.action}`,
                                         ));
@@ -262,16 +276,21 @@ const sam3Plugin: SAM3Plugin = {
                                         // Check if decoder supports mask input
                                         if (e.data.payload?.supportsMaskInput) {
                                             plugin.data.supportsMaskInput = true;
+                                            console.log('[SAM3] Decoder supports mask input for refinement');
                                         }
+                                        console.log('[SAM3] Worker initialized successfully');
                                         resolvePromise();
                                     } else {
+                                        console.error('[SAM3] Worker init error:', e.data.error);
                                         reject(new Error(`SAM3 worker was not initialized. ${e.data.error}`));
                                     }
                                 };
                             } else {
+                                console.log('[SAM3] Worker already initialized');
                                 resolvePromise();
                             }
                         } else {
+                            console.log('[SAM3] Model does not match SAM3, passing through');
                             resolve(null);
                         }
                     });
@@ -294,17 +313,42 @@ const sam3Plugin: SAM3Plugin = {
                     mask: number[][];
                     bounds: [number, number, number, number];
                 }> {
+                    console.log('[SAM3] === LEAVE HOOK START ===');
+                    console.log('[SAM3] leave() called with:', { taskID, modelId: model.id, frame });
+                    console.log('[SAM3] leave() pos_points:', pos_points);
+                    console.log('[SAM3] leave() neg_points:', neg_points);
+                    console.log('[SAM3] leave() obj_bbox:', obj_bbox);
+                    console.log('[SAM3] leave() result type:', typeof result);
+                    console.log('[SAM3] leave() result:', result);
+                    if (result) {
+                        console.log('[SAM3] leave() result keys:', Object.keys(result));
+                        console.log('[SAM3] leave() has high_res_feats_0:', 'high_res_feats_0' in result);
+                        console.log('[SAM3] leave() has high_res_feats_1:', 'high_res_feats_1' in result);
+                        console.log('[SAM3] leave() has image_embed:', 'image_embed' in result);
+                        if (result.high_res_feats_0) {
+                            console.log('[SAM3] high_res_feats_0 length:', result.high_res_feats_0.length);
+                            console.log('[SAM3] high_res_feats_0_shape:', result.high_res_feats_0_shape);
+                        }
+                    }
+                    
                     return new Promise((resolve, reject) => {
                         if (!isSam3Model(model.id, plugin.data.modelID)) {
+                            console.log('[SAM3] leave() Model does not match, passing through result');
                             resolve(result);
                             return;
                         }
+                        
+                        console.log('[SAM3] leave() Model matches SAM3, processing...');
 
                         const job = Object.values(plugin.data.jobs).find((_job) => (
                             _job.taskId === taskID && frame >= _job.startFrame && frame <= _job.stopFrame
                         )) as Job;
 
+                        console.log('[SAM3] leave() Found job:', job ? job.id : 'NOT FOUND');
+
                         if (!job) {
+                            console.error('[SAM3] leave() ERROR: Could not find job for taskID:', taskID, 'frame:', frame);
+                            console.log('[SAM3] leave() Available jobs:', Object.keys(plugin.data.jobs));
                             reject(new Error('Could not find a job corresponding to the request'));
                             return;
                         }
@@ -313,41 +357,63 @@ const sam3Plugin: SAM3Plugin = {
                             [job.id]: job,
                         };
 
+                        console.log('[SAM3] leave() Getting frame dimensions...');
                         job.frames.get(frame)
                             .then(({ height: imHeight, width: imWidth }: { height: number; width: number }) => {
+                                console.log('[SAM3] leave() Frame dimensions:', { imWidth, imHeight });
                                 const key = `${taskID}_${frame}`;
 
                                 // Process server response if we have new embeddings
                                 if (result) {
+                                    console.log('[SAM3] leave() Processing server result, decoding embeddings...');
                                     // Decode base64 embeddings from server
                                     // Server returns: high_res_feats_0, high_res_feats_1, image_embed
                                     const decodeEmbedding = (base64: string, shape: number[]): Tensor => {
+                                        console.log('[SAM3] decodeEmbedding: shape=', shape, 'base64 length=', base64?.length);
+                                        if (!base64) {
+                                            throw new Error('base64 string is undefined or null');
+                                        }
+                                        if (!shape || !Array.isArray(shape)) {
+                                            throw new Error(`shape is invalid: ${shape}`);
+                                        }
                                         const binaryStr = window.atob(base64);
                                         const bytes = new Uint8Array(binaryStr.length);
                                         for (let i = 0; i < binaryStr.length; i++) {
                                             bytes[i] = binaryStr.charCodeAt(i);
                                         }
                                         const floatArray = new Float32Array(bytes.buffer);
+                                        console.log('[SAM3] decodeEmbedding: decoded', floatArray.length, 'floats');
                                         return new Tensor('float32', floatArray, shape);
                                     };
 
-                                    plugin.data.emb0Cache.set(
-                                        key,
-                                        decodeEmbedding(result.high_res_feats_0, result.high_res_feats_0_shape),
-                                    );
-                                    plugin.data.emb1Cache.set(
-                                        key,
-                                        decodeEmbedding(result.high_res_feats_1, result.high_res_feats_1_shape),
-                                    );
-                                    plugin.data.emb2Cache.set(
-                                        key,
-                                        decodeEmbedding(result.image_embed, result.image_embed_shape),
-                                    );
+                                    try {
+                                        console.log('[SAM3] Decoding emb0 (high_res_feats_0)...');
+                                        plugin.data.emb0Cache.set(
+                                            key,
+                                            decodeEmbedding(result.high_res_feats_0, result.high_res_feats_0_shape),
+                                        );
+                                        console.log('[SAM3] Decoding emb1 (high_res_feats_1)...');
+                                        plugin.data.emb1Cache.set(
+                                            key,
+                                            decodeEmbedding(result.high_res_feats_1, result.high_res_feats_1_shape),
+                                        );
+                                        console.log('[SAM3] Decoding emb2 (image_embed)...');
+                                        plugin.data.emb2Cache.set(
+                                            key,
+                                            decodeEmbedding(result.image_embed, result.image_embed_shape),
+                                        );
+                                        console.log('[SAM3] All embeddings decoded and cached successfully');
+                                    } catch (decodeError) {
+                                        console.error('[SAM3] ERROR decoding embeddings:', decodeError);
+                                        reject(decodeError);
+                                        return;
+                                    }
                                 } else {
-                                    // Using cached embeddings
+                                    console.log('[SAM3] leave() Using cached embeddings (result is null/undefined)');
                                 }
 
                                 const modelScale = getModelScale(imWidth, imHeight);
+                                console.log('[SAM3] leave() Model scale:', modelScale);
 
                                 // Build clicks array
                                 const clicks: ClickType[] = [];
@@ -368,6 +434,8 @@ const sam3Plugin: SAM3Plugin = {
                                     clicks.push({ clickType: 0, x: point[0], y: point[1] });
                                 });
 
+                                console.log('[SAM3] leave() Built clicks array:', clicks);
+
                                 // Prepare decoder inputs
                                 // Check if we should use mask refinement:
                                 // 1. Decoder must support mask input
@@ -383,17 +451,38 @@ const sam3Plugin: SAM3Plugin = {
                                     isLowResMaskSuitable
                                 );
 
+                                console.log('[SAM3] leave() Mask refinement:', { useMaskRefinement, supportsMaskInput: plugin.data.supportsMaskInput });
+
+                                // Check that embeddings are cached
+                                const emb0 = plugin.data.emb0Cache.get(key);
+                                const emb1 = plugin.data.emb1Cache.get(key);
+                                const emb2 = plugin.data.emb2Cache.get(key);
+                                console.log('[SAM3] leave() Cached embeddings:', {
+                                    emb0: emb0 ? `Tensor ${emb0.dims}` : 'MISSING',
+                                    emb1: emb1 ? `Tensor ${emb1.dims}` : 'MISSING',
+                                    emb2: emb2 ? `Tensor ${emb2.dims}` : 'MISSING',
+                                });
+
+                                if (!emb0 || !emb1 || !emb2) {
+                                    console.error('[SAM3] ERROR: Missing cached embeddings!');
+                                    reject(new Error('Missing cached embeddings'));
+                                    return;
+                                }
+
                                 const inputs = prepareDecoderInputs({
                                     clicks,
-                                    emb0Tensor: plugin.data.emb0Cache.get(key) as Tensor,
-                                    emb1Tensor: plugin.data.emb1Cache.get(key) as Tensor,
-                                    emb2Tensor: plugin.data.emb2Cache.get(key) as Tensor,
+                                    emb0Tensor: emb0,
+                                    emb1Tensor: emb1,
+                                    emb2Tensor: emb2,
                                     modelScale,
                                     maskInput: useMaskRefinement
                                         ? plugin.data.lowResMaskCache.get(key)
                                         : undefined,
                                     hasMaskInput: useMaskRefinement,
                                 });
+
+                                console.log('[SAM3] leave() Prepared decoder inputs, posting to worker...');
+                                console.log('[SAM3] leave() Input keys:', Object.keys(inputs));
 
                                 // Run decoder in worker
                                 plugin.data.worker.postMessage({
@@ -402,7 +491,11 @@ const sam3Plugin: SAM3Plugin = {
                                 });
 
                                 plugin.data.worker.onmessage = (e: MessageEvent) => {
+                                    console.log('[SAM3] Worker DECODE response received');
+                                    console.log('[SAM3] Worker response:', e.data);
+                                    
                                     if (e.data.action !== WorkerAction.DECODE) {
+                                        console.error('[SAM3] Unexpected worker action:', e.data.action);
                                         reject(new Error(
                                             `Caught unexpected action response from worker: ${e.data.action}`,
                                         ));
@@ -410,24 +503,36 @@ const sam3Plugin: SAM3Plugin = {
                                     }
 
                                     if (e.data.error) {
+                                        console.error('[SAM3] Decoder error:', e.data.error);
                                         reject(new Error(`Decoder error: ${e.data.error}`));
                                         return;
                                     }
+
+                                    console.log('[SAM3] Decoder success, processing mask...');
+                                    console.log('[SAM3] Payload:', e.data.payload);
 
                                     const {
                                         maskData: rawMaskData, maskH, maskW, lowResMaskData,
                                     } = e.data.payload;
 
+                                    console.log('[SAM3] Mask dimensions:', { maskW, maskH });
+                                    console.log('[SAM3] rawMaskData type:', typeof rawMaskData);
+                                    console.log('[SAM3] rawMaskData constructor:', rawMaskData?.constructor?.name);
+
                                     // Ensure maskData is array-like (postMessage may serialize differently)
                                     let maskData: ArrayLike<number>;
                                     if (rawMaskData instanceof Float32Array) {
                                         maskData = rawMaskData;
+                                        console.log('[SAM3] Using Float32Array directly');
                                     } else if (Array.isArray(rawMaskData)) {
                                         maskData = rawMaskData;
+                                        console.log('[SAM3] Using array directly');
                                     } else if (typeof rawMaskData === 'object' && rawMaskData !== null) {
                                         // Convert object-like {0: val, 1: val, ...} to array
                                         maskData = Object.values(rawMaskData) as number[];
+                                        console.log('[SAM3] Converted object to array, length:', maskData.length);
                                     } else {
+                                        console.error('[SAM3] Invalid maskData type:', typeof rawMaskData);
                                         reject(new Error(`Invalid maskData type: ${typeof rawMaskData}`));
                                         return;
                                     }
@@ -435,6 +540,7 @@ const sam3Plugin: SAM3Plugin = {
                                     // Store low-res mask for future refinement (if available)
                                     // Convert raw Float32Array back to Tensor for cache storage
                                     if (lowResMaskData && plugin.data.supportsMaskInput) {
+                                        console.log('[SAM3] Caching low-res mask for refinement');
                                         const lowResMaskTensor = new Tensor(
                                             'float32',
                                             new Float32Array(lowResMaskData),
@@ -443,6 +549,7 @@ const sam3Plugin: SAM3Plugin = {
                                         plugin.data.lowResMaskCache.set(key, lowResMaskTensor);
                                     }
 
+                                    console.log('[SAM3] Resizing mask to image dimensions...');
                                     // Following official SAM3 and usls implementations:
                                     // Compute bbox on low-res mask, then interpolate only within that region
                                     // This is MUCH faster for large images (97%+ fewer pixels to process)
@@ -454,8 +561,12 @@ const sam3Plugin: SAM3Plugin = {
                                         imHeight,
                                     );
 
+                                    console.log('[SAM3] Final mask bounds:', pixelBounds);
+                                    console.log('[SAM3] Final mask size:', croppedMask.length, 'x', croppedMask[0]?.length);
+
                                     plugin.data.lastClicks = clicks;
 
+                                    console.log('[SAM3] === LEAVE HOOK SUCCESS ===');
                                     resolve({
                                         mask: croppedMask,
                                         bounds: pixelBounds,
@@ -463,10 +574,14 @@ const sam3Plugin: SAM3Plugin = {
                                 };
 
                                 plugin.data.worker.onerror = (error) => {
+                                    console.error('[SAM3] Worker error:', error);
                                     reject(error);
                                 };
                             })
-                            .catch(reject);
+                            .catch((err) => {
+                                console.error('[SAM3] leave() catch error:', err);
+                                reject(err);
+                            });
                     });
                 },
             },
